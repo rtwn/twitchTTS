@@ -15,11 +15,12 @@
 	let channel = "";
 	let allowMods = false;
 	let allowVips = false;
+	let allowCustomVoice = false;
 	// let ui = false;
 	let whiteList = "";
 	let blackList = "";
 
-	let toasts: { id: number, msg: string }[] = [];
+	let toasts: { id: number; msg: string }[] = [];
 	let toastIdCounter = 0;
 	let buttonClicked = false;
 	const MAX_TOASTS = 3;
@@ -35,9 +36,10 @@
 			voice: selectedVoice,
 			mods: allowMods.toString(),
 			vips: allowVips.toString(),
+			customVoice: allowCustomVoice.toString(),
 			// ui: ui.toString(),
 			white: whiteList.trim(),
-			black: blackList.trim(),
+			black: blackList.trim()
 		});
 
 		const link = `${window.location.origin}/tts?${params.toString()}`;
@@ -47,7 +49,9 @@
 				showToastMsg("Link copied to clipboard!");
 				animateButton();
 			})
-			.catch(() => showToastMsg("Failed to copy link."));
+			.catch(() => {
+				showToastMsg("Failed to copy link.");
+			});
 	}
 
 	function showToastMsg(msg: string) {
@@ -66,7 +70,9 @@
 
 	function animateButton() {
 		buttonClicked = true;
-		setTimeout(() => buttonClicked = false, 200);
+		setTimeout(() => {
+			buttonClicked = false;
+		}, 200);
 	}
 </script>
 
@@ -75,7 +81,12 @@
 
 	<div class="form-group">
 		<label for="channel">Twitch Channel:</label>
-		<input id="channel" type="text" bind:value={channel} placeholder="Enter your channel" />
+		<input
+			id="channel"
+			type="text"
+			bind:value={channel}
+			placeholder="Enter your channel"
+		/>
 	</div>
 
 	<div class="form-group">
@@ -88,26 +99,59 @@
 	</div>
 
 	<div class="form-group">
-		<label><input type="checkbox" bind:checked={allowMods} /> Allow Moderators</label>
+		<label>
+			<input type="checkbox" bind:checked={allowMods} />
+			Allow Moderators
+		</label>
 	</div>
+
 	<div class="form-group">
-		<label><input type="checkbox" bind:checked={allowVips} /> Allow VIPs</label>
+		<label>
+			<input type="checkbox" bind:checked={allowVips} />
+			Allow VIPs
+		</label>
 	</div>
-	<!--	<div class="form-group">-->
-	<!--		<label><input type="checkbox" bind:checked={ui} /> Show Skip TTS Button</label>-->
-	<!--	</div>-->
+
+	<div class="form-group">
+		<label>
+			<input type="checkbox" bind:checked={allowCustomVoice} />
+			Allow custom voice per message (!tts -v)
+		</label>
+	</div>
+
+	<!--
+<div class="form-group">
+	<label>
+		<input type="checkbox" bind:checked={ui} />
+		Show Skip TTS Button
+	</label>
+</div>
+-->
 
 	<div class="form-group">
 		<label for="white">Whitelist (comma-separated usernames):</label>
-		<input id="white" type="text" bind:value={whiteList} placeholder="e.g. user1,user2" />
+		<input
+			id="white"
+			type="text"
+			bind:value={whiteList}
+			placeholder="e.g. user1,user2"
+		/>
 	</div>
 
 	<div class="form-group">
 		<label for="black">Blacklist (comma-separated usernames):</label>
-		<input id="black" type="text" bind:value={blackList} placeholder="e.g. user3,user4" />
+		<input
+			id="black"
+			type="text"
+			bind:value={blackList}
+			placeholder="e.g. user3,user4"
+		/>
 	</div>
 
-	<button class="generate-btn {buttonClicked ? 'clicked' : ''}" on:click={generateLink}>
+	<button
+		class="generate-btn {buttonClicked ? 'clicked' : ''}"
+		on:click={generateLink}
+	>
 		Generate & Copy Link
 	</button>
 
@@ -145,13 +189,14 @@
         font-weight: 600;
     }
 
-    input[type="text"], select {
+    input[type="text"],
+    select {
         width: 100%;
         padding: 8px 12px;
         border-radius: 6px;
         border: 1px solid #ccc;
         font-size: 14px;
-        box-sizing: border-box; /* важно */
+        box-sizing: border-box;
     }
 
     input[type="checkbox"] {
