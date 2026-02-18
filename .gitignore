@@ -3,3 +3,11 @@
 /.venv
 
 /node_modules
+.DS_Store
+/build
+/package
+.env
+.env.*
+!.env.example
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
