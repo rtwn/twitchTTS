@@ -3,7 +3,7 @@
     import { generateTTSLink, copyToClipboard } from '$lib/services/utils';
     import type { TTSConfig } from '$lib/types';
 
-    // Состояние формы (используем твой объект config)
+    // Состояние формы (оригинальные поля + настройки YouTube)
     let config: TTSConfig = {
         channel: "",
         voice: "Brian",
@@ -11,7 +11,9 @@
         vips: false,
         customVoice: false,
         white: "",
-        black: ""
+        black: "",
+        ytEnabled: false,
+        ytMaxLen: 30
     };
 
     let toasts: { id: number; msg: string }[] = [];
@@ -85,6 +87,25 @@
             <input type="checkbox" bind:checked={config.customVoice} />
             Allow custom voice per message (!tts -v)
         </label>
+
+        <label class="checkbox-label">
+            <input type="checkbox" bind:checked={config.ytEnabled} />
+            Enable YouTube Audio (!play)
+        </label>
+
+        {#if config.ytEnabled}
+            <div style="margin-left: 26px; margin-top: 4px; margin-bottom: 4px;">
+                <label for="ytMaxLen" style="font-weight: normal; font-size: 0.85rem; margin-bottom: 4px;">
+                    Max duration (sec, 0 = unlimited):
+                </label>
+                <input
+                        id="ytMaxLen"
+                        type="number"
+                        bind:value={config.ytMaxLen}
+                        style="width: 80px; padding: 6px; border-radius: 6px; border: 1px solid #ccc; font-size: 14px;"
+                />
+            </div>
+        {/if}
     </div>
 
     <div class="form-group">
@@ -162,7 +183,7 @@
         box-sizing: border-box;
     }
 
-    input[type="text"]:focus {
+    input[type="text"]:focus, input[type="number"]:focus {
         outline: none;
         border-color: #7c3aed;
         box-shadow: 0 0 0 2px #ddd6fe;

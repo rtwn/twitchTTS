@@ -16,4 +16,6 @@ export interface TTSConfig {
     customVoice: boolean;
     white: string;
     black: string;
+    ytEnabled: boolean;
+    ytMaxLen: number;
 }
