@@ -135,6 +135,12 @@ const COSMETICS_QUERY = `query GetCosmetics($list: [ObjectID!]) {
     }
 }`;
 
+function buildPaintDetails(paint: any): SevenTVPaintDetails | null {
+    const dropShadow = (paint.shadows || []).length ? cssDropShadowFromPaint(paint.shadows) : undefined;
+    const backgroundImage = paint.image_url ? `url(${paint.image_url})` : cssGradientFromPaint(paint);
+    return backgroundImage ? { backgroundImage, dropShadow } : null;
+}
+
 async function fetch7TVPaintById(paintId: string): Promise<SevenTVPaintDetails | null> {
     if (paintCache.has(paintId)) return paintCache.get(paintId)!;
 
@@ -154,11 +160,7 @@ async function fetch7TVPaintById(paintId: string): Promise<SevenTVPaintDetails |
         const paint = json?.data?.cosmetics?.paints?.[0];
         if (!paint) { paintCache.set(paintId, null); return null; }
 
-        const dropShadow = (paint.shadows || []).length ? cssDropShadowFromPaint(paint.shadows) : undefined;
-        const backgroundImage = paint.image_url ? `url(${paint.image_url})` : cssGradientFromPaint(paint);
-        if (!backgroundImage) { paintCache.set(paintId, null); return null; }
-
-        const details: SevenTVPaintDetails = { backgroundImage, dropShadow };
+        const details = buildPaintDetails(paint);
         paintCache.set(paintId, details);
         return details;
     } catch (e) {
@@ -166,6 +168,65 @@ async function fetch7TVPaintById(paintId: string): Promise<SevenTVPaintDetails |
         paintCache.set(paintId, null);
         return null;
     }
+}
+
+const ALL_PAINTS_QUERY = `query GetAllPaints {
+    cosmetics {
+        paints {
+            id
+            function
+            color
+            angle
+            shape
+            image_url
+            repeat
+            stops { at color __typename }
+            shadows { x_offset y_offset radius color __typename }
+            __typename
+        }
+        __typename
+    }
+}`;
+
+let paintCatalogPreloadPromise: Promise<void> | null = null;
+
+/**
+ * Предзагружает ВЕСЬ каталог 7TV-пейнтов одним запросом (без фильтра по
+ * list — отдаёт все существующие пейнты). Пейнт — это общий "шаблон",
+ * которым пользуется много разных зрителей, поэтому его выгоднее один раз
+ * загрузить целиком при старте виджета, чем ждать отдельный запрос на
+ * КАЖДОГО нового зрителя с градиентным ником (та самая задержка ~0.5с).
+ * После предзагрузки fetch7TVPaintById() находит пейнт уже в кэше и не
+ * делает сетевой запрос вообще.
+ *
+ * Вызывается не блокируя рендер чата (fire-and-forget из onMount) — если
+ * первое сообщение с пейнтом придёт раньше, чем каталог догрузится,
+ * fetch7TVPaintById() просто сходит в сеть сам, как раньше.
+ */
+export function preloadSevenTVPaintCatalog(): Promise<void> {
+    if (!paintCatalogPreloadPromise) {
+        paintCatalogPreloadPromise = (async () => {
+            try {
+                const res = await fetch('https://7tv.io/v3/gql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ operationName: 'GetAllPaints', query: ALL_PAINTS_QUERY })
+                });
+                if (!res.ok) return;
+
+                const json = await res.json();
+                const paints = json?.data?.cosmetics?.paints || [];
+                paints.forEach((paint: any) => {
+                    // Не затираем то, что уже могло прийти точечным запросом раньше
+                    if (paintCache.has(paint.id)) return;
+                    paintCache.set(paint.id, buildPaintDetails(paint));
+                });
+            } catch (e) {
+                console.error('[7TV] Ошибка предзагрузки каталога пейнтов:', e);
+            }
+        })();
+    }
+    return paintCatalogPreloadPromise;
 }
 
 function cssGradientFromPaint(paint: any): string | undefined {

@@ -6,14 +6,15 @@
         fetchFFZEmotes,
         fetchFFZBadges,
         fetchFFZPersonalBadges,
+        preloadSevenTVPaintCatalog,
         resolveTwitchUser
     } from '$lib/services/twitch-api';
     import type { ChatMessage } from '$lib/services/twitch-irc';
-    import { page } from '$app/stores';
+    import { page } from '$app/state';
 
     export let channel: string;
 
-    const urlParams = $page.url.searchParams;
+    const urlParams = page.url.searchParams;
 
     // Персональные плюшки (7TV-цвет/бейдж, личный FFZ-бейдж) можно выключить
     // через ?personalCosmetics=false, если не нужны доп. запросы на чатера.
@@ -23,17 +24,17 @@
     const messageLifetimeMs = parseInt(urlParams.get('messageLifetime') || '0');
 
     let chatConfig = {
-        fontSize: urlParams.get('fontSize') || '28px',
+        fontSize: urlParams.get('fontSize') || '24px',
         emoteSize: urlParams.get('emoteSize') || '1.5em',
-        badgeSize: urlParams.get('badgeSize') || '1em',
+        badgeSize: urlParams.get('badgeSize') || '2.2em',
         fontWeight: urlParams.get('fontWeight') || '600',
         outlineColor: '#000000',
         outlineSize: urlParams.get('outlineSize') || '4px',
-        spacing: urlParams.get('spacing') || '10px',
+        spacing: urlParams.get('spacing') || '8px',
         fontFamily: urlParams.get('font') || 'sans-serif'
     };
 
-    type Fragment = { type: 'text' | 'emote'; val: string; zeroWidth?: boolean };
+    type Fragment = { type: 'text' | 'emote'; val: string; zeroWidth?: boolean; mentionColor?: string };
     type UIMessage = {
         id: string;
         username: string; // login, нужен для докладки бейджей после resolve
@@ -52,6 +53,12 @@
     let ffzModBadge: string | undefined;
     let ffzVipBadge: string | undefined;
     let ffzChannelUserBadges = new Map<string, string[]>();
+
+    // Цвета зрителей, которые уже писали в чат (login -> цвет). Используется
+    // для подсветки упоминаний (@ник и просто ник) их собственным цветом.
+    // Обновляется по мере поступления сообщений — упоминания людей, которые
+    // ещё не написали ни разу в этой сессии, подсветить нечем, это ожидаемо.
+    let userColorMap = new Map<string, string>();
 
     // Стандартная палитра Twitch для зрителей, которые никогда не выбирали
     // себе цвет ника — тег `color` в IRC у них пустой. Раньше такие ники
@@ -141,6 +148,18 @@
                 const ffz = channelEmoteMap.get(clean);
                 if (ffz) { result.push({ type: 'emote', val: ffz }); return; }
 
+                // Упоминание: "@ник" или просто "ник", если это известный по
+                // чату логин (без учёта регистра и хвостовой пунктуации вроде
+                // запятой/двоеточия). Твичевые логины — это [a-zA-Z0-9_].
+                const mentionMatch = /^(@?)([a-zA-Z0-9_]{2,25})([.,!?:;)]*)$/.exec(clean);
+                if (mentionMatch) {
+                    const mentionColor = userColorMap.get(mentionMatch[2].toLowerCase());
+                    if (mentionColor) {
+                        result.push({ type: 'text', val: word, mentionColor });
+                        return;
+                    }
+                }
+
                 result.push({ type: 'text', val: word });
             });
         };
@@ -188,11 +207,14 @@
     export function addMessage(msg: ChatMessage) {
         if (messages.some((m) => m.id === msg.id)) return;
 
+        const color = msg.color || defaultColorForUser(msg.username);
+        userColorMap.set(msg.username, color);
+
         const uiMsg: UIMessage = {
             id: msg.id,
             username: msg.username,
             user: msg.displayName,
-            color: msg.color || defaultColorForUser(msg.username),
+            color,
             fragments: parseMessage(msg.text, msg.emotes),
             badgeUrls: [...msg.badges.map((b) => badgeUrlFor(b.name, b.version)), ...collectFFZChannelBadges(msg)]
         };
@@ -203,7 +225,7 @@
             setTimeout(() => { messages = messages.filter((m) => m.id !== uiMsg.id); }, messageLifetimeMs);
         }
 
-        if (personalCosmeticsEnabled) enrichWithPersonalCosmetics(msg.username, uiMsg.id);
+        if (personalCosmeticsEnabled) void enrichWithPersonalCosmetics(msg.username, msg.userId, uiMsg.id);
     }
 
     /**
@@ -212,23 +234,31 @@
      * Резолвятся асинхронно и докладываются в уже отрисованное сообщение,
      * т.к. ждать их перед показом сообщения не хочется — это лишняя задержка
      * в живом чате.
+     *
+     * userId уже приходит прямо в теге IRC-сообщения (user-id) — раньше тут
+     * был отдельный поход в api.ivr.fi, чтобы узнать тот же самый ID по
+     * логину. Один из двух round-trip'ов, из-за которых была задержка
+     * ~0.5с на каждого НОВОГО зрителя, теперь просто не нужен.
      */
-    async function enrichWithPersonalCosmetics(username: string, msgId: string) {
+    async function enrichWithPersonalCosmetics(username: string, userId: string, msgId: string) {
         try {
-            const [user, ffzPersonalBadges] = await Promise.all([
-                resolveTwitchUser(username),
+            const resolvedId = userId || (await resolveTwitchUser(username))?.id;
+
+            const [stvCosmetics, ffzPersonalBadges] = await Promise.all([
+                resolvedId ? fetch7TVUserCosmetics(resolvedId) : Promise.resolve(null),
                 fetchFFZPersonalBadges(username).catch(() => [])
             ]);
 
-            const stvCosmetics = user ? await fetch7TVUserCosmetics(user.id) : null;
-
             if (!stvCosmetics && ffzPersonalBadges.length === 0) return;
+
+            const finalColor = stvCosmetics?.paintColor;
+            if (finalColor) userColorMap.set(username, finalColor);
 
             messages = messages.map((m) => {
                 if (m.id !== msgId) return m;
                 return {
                     ...m,
-                    color: stvCosmetics?.paintColor || m.color,
+                    color: finalColor || m.color,
                     paintBackgroundImage: stvCosmetics?.paintBackgroundImage,
                     paintDropShadow: stvCosmetics?.paintDropShadow,
                     badgeUrls: [
@@ -242,7 +272,7 @@
     }
 
     export function clearUser(username: string) {
-        messages = messages.filter((m) => m.username.toLowerCase() === username.toLowerCase() ? false : true);
+        messages = messages.filter((m) => m.username.toLowerCase() !== username.toLowerCase());
     }
 
     export function clearAllMessages() {
@@ -250,6 +280,10 @@
     }
 
     onMount(async () => {
+        // Не блокирует остальной onMount и рендер — просто прогревает кэш
+        // пейнтов к моменту, когда придёт первое сообщение с градиентом.
+        preloadSevenTVPaintCatalog();
+
         try {
             const user = await resolveTwitchUser(channel);
             if (!user) return;
@@ -293,7 +327,11 @@
 
                 {#each m.fragments as f, i}
                     {#if f.type === 'text'}
-                        <span class="chat-text">{f.val}</span>
+                        {#if f.mentionColor}
+                            <span class="chat-text mention" style="color: {f.mentionColor}">{f.val}</span>
+                        {:else}
+                            <span class="chat-text">{f.val}</span>
+                        {/if}
                     {:else if f.zeroWidth && i > 0}
                         <span class="emote-stack">
                             <img src={m.fragments[i - 1].val} class="emote" alt="" style="visibility:hidden" />
@@ -364,6 +402,10 @@
 
     .chat-text {
         white-space: pre-wrap;
+    }
+
+    .mention {
+        font-weight: 800;
     }
 
     .badges {

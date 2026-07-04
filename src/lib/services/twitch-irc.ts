@@ -17,6 +17,7 @@ export interface ChatMessage {
     id: string;
     channel: string;
     username: string;      // login (нижний регистр)
+    userId: string;        // числовой Twitch ID — приходит прямо в теге, резолвить через IVR не нужно
     displayName: string;
     color: string;         // может быть '' — пользователь не задавал цвет
     badges: TwitchBadge[];
@@ -139,12 +140,12 @@ export class TwitchIRC {
     private reconnectAttempts = 0;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     private manuallyClosed = false;
-    private nick: string;
+    private readonly nick: string;
 
-    private messageHandlers: MessageHandler[] = [];
-    private clearChatHandlers: ClearChatHandler[] = [];
-    private connectHandlers: StatusHandler[] = [];
-    private disconnectHandlers: StatusHandler[] = [];
+    private readonly messageHandlers: MessageHandler[] = [];
+    private readonly clearChatHandlers: ClearChatHandler[] = [];
+    private readonly connectHandlers: StatusHandler[] = [];
+    private readonly disconnectHandlers: StatusHandler[] = [];
 
     constructor() {
         this.nick = `justinfan${Math.floor(10000 + Math.random() * 80000)}`;
@@ -152,6 +153,11 @@ export class TwitchIRC {
 
     onMessage(handler: MessageHandler) { this.messageHandlers.push(handler); }
     onClearChat(handler: ClearChatHandler) { this.clearChatHandlers.push(handler); }
+    // onConnect/onDisconnect сейчас не используются виджетом чата (ему хватает
+    // onMessage/onClearChat), но это осознанно оставлено в публичном API
+    // класса — стандартные хуки для любого потребителя WebSocket-обёртки
+    // (например, чтобы показать "переподключение..." в UI). Не мёртвый код,
+    // а просто пока не задействованная часть интерфейса.
     onConnect(handler: StatusHandler) { this.connectHandlers.push(handler); }
     onDisconnect(handler: StatusHandler) { this.disconnectHandlers.push(handler); }
 
@@ -262,6 +268,7 @@ export class TwitchIRC {
             id: t['id'] || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
             channel,
             username,
+            userId: t['user-id'] || '',
             displayName: t['display-name'] || username,
             color: t['color'] || '',
             badges,

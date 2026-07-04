@@ -1,6 +1,6 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte';
-    import { page } from '$app/stores';
+    import { page } from '$app/state';
     import { TwitchIRC } from '$lib/services/twitch-irc';
     import type { ChatMessage } from '$lib/services/twitch-irc';
 
@@ -10,9 +10,9 @@
     let playerRef: Player;
     let chatRef: Chat;
 
-    const channel = $page.url.searchParams.get('channel') || '';
-    const chatEnabled = $page.url.searchParams.get('chat') !== 'false';
-    const ttsEnabled = $page.url.searchParams.get('tts') !== 'false';
+    const channel = page.url.searchParams.get('channel') || '';
+    const chatEnabled = page.url.searchParams.get('chat') !== 'false';
+    const ttsEnabled = page.url.searchParams.get('tts') !== 'false';
 
     let irc: TwitchIRC | null = null;
 
@@ -57,7 +57,7 @@
 </script>
 
 {#if ttsEnabled}
-    <Player bind:this={playerRef} {channel} />
+    <Player bind:this={playerRef} />
 {/if}
 
 {#if chatEnabled}

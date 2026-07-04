@@ -4,11 +4,9 @@
 
 <script lang="ts">
     import { onMount } from 'svelte';
-    import { page } from '$app/stores';
+    import { page } from '$app/state';
 
-    export let channel: string | null;
-
-    const params = $page.url.searchParams;
+    const params = page.url.searchParams;
     const ttsVoiceDefault = params.get('voice') || 'Brian';
     const customVoiceEnabled = params.get('customVoice') === 'true';
     const ytEnabled = params.get('ytEnabled') === 'true';
@@ -40,14 +38,14 @@
     }
 
     function extractVideoId(url: string) {
-        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
         const match = url.match(regExp);
         return (match && match[2].length === 11) ? match[2] : null;
     }
 
     function cleanText(text: string): string {
         let res = text.replace(/(.)\1{3,}/gi, '$1$1$1');
-        res = res.replace(/(https?:\/\/[^\s]+)/g, 'ссылка');
+        res = res.replace(/(https?:\/\/\S+)/g, 'ссылка');
         // Раньше здесь был жёстко зашитый диапазон а-яА-ЯёЁ — это резало
         // украинские (і, ї, є, ґ), польские, турецкие и любые другие буквы
         // с диакритикой, превращая слова в мусор для TTS. \p{L}/\p{N} с
@@ -86,7 +84,10 @@
                     audioEl.src = url;
                     audioEl.play().catch(() => { isPlaying = false; setTimeout(processQueue, 100); });
                     audioEl.onended = () => { isPlaying = false; setTimeout(processQueue, 100); };
-                } else { throw new Error(); }
+                } else {
+                    isPlaying = false;
+                    setTimeout(processQueue, 100);
+                }
             } catch { isPlaying = false; setTimeout(processQueue, 100); }
         }
     }

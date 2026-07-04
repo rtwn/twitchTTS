@@ -31,6 +31,5 @@
     select:focus {
         outline: none;
         border-color: #7c3aed;
-        ring: 2px #ddd6fe;
     }
 </style>
