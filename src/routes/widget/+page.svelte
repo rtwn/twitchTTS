@@ -1,7 +1,8 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, onDestroy } from 'svelte';
     import { page } from '$app/stores';
-    import ComfyJS from 'comfy.js';
+    import { TwitchIRC } from '$lib/services/twitch-irc';
+    import type { ChatMessage } from '$lib/services/twitch-irc';
 
     import Player from '$lib/components/Player.svelte';
     import Chat from '$lib/components/Chat.svelte';
@@ -13,33 +14,45 @@
     const chatEnabled = $page.url.searchParams.get('chat') !== 'false';
     const ttsEnabled = $page.url.searchParams.get('tts') !== 'false';
 
-    // Глобальная переменная для предотвращения двойной инициализации
-    let initialized = false;
+    let irc: TwitchIRC | null = null;
+
+    function parseCommand(msg: ChatMessage): { command: string; rest: string } | null {
+        if (!msg.text.startsWith('!')) return null;
+        const spaceIdx = msg.text.indexOf(' ');
+        const command = (spaceIdx === -1 ? msg.text.slice(1) : msg.text.slice(1, spaceIdx));
+        const rest = spaceIdx === -1 ? '' : msg.text.slice(spaceIdx + 1);
+        return { command, rest };
+    }
 
     onMount(() => {
-        if (!channel || initialized) return;
-        initialized = true;
+        if (!channel) return;
 
-        console.log("Initializing ComfyJS for channel:", channel);
+        irc = new TwitchIRC();
 
-        ComfyJS.onCommand = (user, command, message, flags, extra) => {
+        irc.onMessage((msg) => {
+            if (chatEnabled && chatRef) chatRef.addMessage(msg);
+
             if (ttsEnabled && playerRef) {
-                playerRef.handleCommand(user, command, message, flags);
+                const parsed = parseCommand(msg);
+                if (parsed) {
+                    const flags = { broadcaster: msg.isBroadcaster, mod: msg.isMod, vip: msg.isVip };
+                    playerRef.handleCommand(msg.username, parsed.command, parsed.rest, flags);
+                }
             }
-        };
+        });
 
-        ComfyJS.onChat = (user, message, flags, self, extra) => {
-            if (chatEnabled && chatRef) {
-                chatRef.addMessage(user, message, flags, extra);
-            }
-        };
+        irc.onClearChat((evt) => {
+            if (!chatRef) return;
+            if (evt.targetUser) chatRef.clearUser(evt.targetUser);
+            else chatRef.clearAllMessages();
+        });
 
-        ComfyJS.Init(channel);
+        irc.connect(channel);
+    });
 
-        return () => {
-            initialized = false;
-            try { ComfyJS.Disconnect(); } catch (e) {}
-        };
+    onDestroy(() => {
+        irc?.disconnect();
+        irc = null;
     });
 </script>
 

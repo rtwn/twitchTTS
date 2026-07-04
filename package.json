@@ -10,9 +10,7 @@
     "format": "prettier --write .",
     "lint": "eslint ."
   },
-  "dependencies": {
-    "comfy.js": "^1.1.16"
-  },
+  "dependencies": {},
   "engines": {
     "node": ">=18 <=20"
   },

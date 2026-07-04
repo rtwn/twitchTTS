@@ -48,7 +48,14 @@
     function cleanText(text: string): string {
         let res = text.replace(/(.)\1{3,}/gi, '$1$1$1');
         res = res.replace(/(https?:\/\/[^\s]+)/g, 'ссылка');
-        return res.replace(/([!?.]){2,}/g, '$1').replace(/[^\w\sа-яА-ЯёЁ!,?.]/g, '').replace(/\s+/g, ' ').trim();
+        // Раньше здесь был жёстко зашитый диапазон а-яА-ЯёЁ — это резало
+        // украинские (і, ї, є, ґ), польские, турецкие и любые другие буквы
+        // с диакритикой, превращая слова в мусор для TTS. \p{L}/\p{N} с
+        // флагом /u покрывают буквы и цифры любого языка одинаково.
+        return res.replace(/([!?.]){2,}/g, '$1')
+            .replace(/[^\p{L}\p{N}\s!,?.]/gu, '')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     async function processQueue() {

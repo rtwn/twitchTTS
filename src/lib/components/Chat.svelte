@@ -1,12 +1,26 @@
 <script lang="ts">
     import { onMount } from 'svelte';
-    import { fetch7TVEmotesByNickname, fetchFFZEmotes } from '$lib/services/twitch-api';
-    import { env } from '$env/dynamic/public';
+    import {
+        fetch7TVEmotesByTwitchId,
+        fetch7TVUserCosmetics,
+        fetchFFZEmotes,
+        fetchFFZBadges,
+        fetchFFZPersonalBadges,
+        resolveTwitchUser
+    } from '$lib/services/twitch-api';
+    import type { ChatMessage } from '$lib/services/twitch-irc';
     import { page } from '$app/stores';
 
     export let channel: string;
 
     const urlParams = $page.url.searchParams;
+
+    // Персональные плюшки (7TV-цвет/бейдж, личный FFZ-бейдж) можно выключить
+    // через ?personalCosmetics=false, если не нужны доп. запросы на чатера.
+    const personalCosmeticsEnabled = urlParams.get('personalCosmetics') !== 'false';
+    // Через сколько сообщение исчезает само по себе (0 — не исчезает,
+    // только вытесняется новыми, как раньше).
+    const messageLifetimeMs = parseInt(urlParams.get('messageLifetime') || '0');
 
     let chatConfig = {
         fontSize: urlParams.get('fontSize') || '28px',
@@ -16,77 +30,122 @@
         outlineColor: '#000000',
         outlineSize: urlParams.get('outlineSize') || '4px',
         spacing: urlParams.get('spacing') || '10px',
-        fontFamily: urlParams.get('font') || "sans-serif"
+        fontFamily: urlParams.get('font') || 'sans-serif'
     };
 
-    const CLIENT_ID = env.PUBLIC_TWITCH_CLIENT_ID || '';
-    const ACCESS_TOKEN = env.PUBLIC_TWITCH_ACCESS_TOKEN || '';
+    type Fragment = { type: 'text' | 'emote'; val: string; zeroWidth?: boolean };
+    type UIMessage = {
+        id: string;
+        username: string; // login, нужен для докладки бейджей после resolve
+        user: string;
+        color: string;
+        paintBackgroundImage?: string;
+        paintDropShadow?: string;
+        fragments: Fragment[];
+        badgeUrls: string[];
+    };
 
-    type Fragment = { type: 'text' | 'emote'; val: string };
-    type Message = { id: string; user: string; color: string; fragments: Fragment[]; badgeUrls: string[]; };
-
-    let messages: Message[] = [];
-    let emoteMap = new Map<string, string>();
+    let messages: UIMessage[] = [];
+    let emoteMap = new Map<string, { url: string; zeroWidth: boolean }>();
     let channelEmoteMap = new Map<string, string>();
     let badgeDictionary: Record<string, string> = {};
+    let ffzModBadge: string | undefined;
+    let ffzVipBadge: string | undefined;
+    let ffzChannelUserBadges = new Map<string, string[]>();
+
+    // Стандартная палитра Twitch для зрителей, которые никогда не выбирали
+    // себе цвет ника — тег `color` в IRC у них пустой. Раньше такие ники
+    // просто становились белыми; так делают "настоящие" клиенты (сам Twitch,
+    // Chatterino и т.д.) — выбирают стабильный цвет из этого набора по нику,
+    // чтобы разные зрители визуально не сливались в один белый.
+    const DEFAULT_NAME_COLORS = [
+        '#FF0000', '#0000FF', '#00FF00', '#B22222', '#FF7F50',
+        '#9ACD32', '#FF4500', '#2E8B57', '#DAA520', '#D2691E',
+        '#5F9EA0', '#1E90FF', '#FF69B4', '#8A2BE2', '#00FF7F'
+    ];
+
+    function defaultColorForUser(username: string): string {
+        let hash = 0;
+        for (let i = 0; i < username.length; i++) {
+            hash = (hash * 31 + username.charCodeAt(i)) >>> 0;
+        }
+        return DEFAULT_NAME_COLORS[hash % DEFAULT_NAME_COLORS.length];
+    }
 
     function handleImageError(event: Event) {
         const img = event.currentTarget as HTMLImageElement;
         if (img) img.style.display = 'none';
     }
 
-    async function loadHelixData(broadcasterId: string) {
-        if (!CLIENT_ID || !ACCESS_TOKEN) return;
-        const headers = { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${ACCESS_TOKEN}` };
+    async function loadBadges(broadcasterId: string) {
         try {
-            const [gB, cB, gE, cE] = await Promise.all([
-                fetch('https://api.twitch.tv/helix/chat/badges/global', { headers }),
-                fetch(`https://api.twitch.tv/helix/chat/badges?broadcaster_id=${broadcasterId}`, { headers }),
-                fetch('https://api.twitch.tv/helix/chat/emotes/global', { headers }),
-                fetch(`https://api.twitch.tv/helix/chat/emotes?broadcaster_id=${broadcasterId}`, { headers })
-            ]);
-            const gBadgeData = await gB.json();
-            const cBadgeData = await cB.json();
-            const gEmoteData = await gE.json();
-            const cEmoteData = await cE.json();
-
-            const pB = (res: any) => res?.data?.forEach((b: any) => b.versions.forEach((v: any) => {
-                badgeDictionary[`${b.set_id}:${v.id}`] = v.image_url_4x;
-            }));
-            pB(gBadgeData); pB(cBadgeData);
-
-            const pE = (data: any[]) => data?.forEach((e: any) => {
-                const url = `https://static-cdn.jtvnw.net/emoticons/v2/${e.id}/default/dark/3.0`;
-                channelEmoteMap.set(e.name, url);
-            });
-            pE(gEmoteData.data); pE(cEmoteData.data);
-        } catch (e) { console.error("Error loading Helix data:", e); }
+            const res = await fetch(`/api/v1/badges?broadcasterId=${broadcasterId}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            badgeDictionary = data.badges || {};
+        } catch (e) {
+            console.error('Не удалось загрузить бейджи Twitch:', e);
+        }
     }
 
-    function parseMessage(text: string, twitchEmotes: any): Fragment[] {
-        let nodes: { type: 'emote'; val: string; start: number; end: number }[] = [];
+    async function loadChannelExtras(twitchId: string, login: string) {
+        const [ffzEmotes, stv, ffzBadges] = await Promise.all([
+            fetchFFZEmotes(login).catch(() => new Map<string, string>()),
+            fetch7TVEmotesByTwitchId(twitchId).catch(() => new Map()),
+            fetchFFZBadges(login).catch(() => ({ userBadges: new Map() } as import('$lib/services/twitch-api').FFZBadges))
+        ]);
+        channelEmoteMap = ffzEmotes;
+        emoteMap = stv as Map<string, { url: string; zeroWidth: boolean }>;
+        ffzModBadge = ffzBadges.moderatorBadgeUrl;
+        ffzVipBadge = ffzBadges.vipBadgeUrl;
+        ffzChannelUserBadges = ffzBadges.userBadges;
+    }
+
+    /**
+     * Разбирает текст сообщения на фрагменты текст/эмоут.
+     * Порядок приоритета: нативные твич-эмоуты (по индексам из тегов IRC,
+     * это единственно надёжный способ, т.к. текст мог содержать похожие
+     * слова) → 7TV → FFZ. Плюс поддержка zero-width эмоутов 7TV — они не
+     * добавляют новый фрагмент, а помечаются как оверлей поверх предыдущего.
+     */
+    function parseMessage(text: string, twitchEmotes: Record<string, string[]> | undefined): Fragment[] {
+        const nodes: { type: 'emote'; val: string; start: number; end: number }[] = [];
         if (twitchEmotes) {
             Object.entries(twitchEmotes).forEach(([id, positions]) => {
-                (positions as string[]).forEach((range: string) => {
+                positions.forEach((range) => {
                     const [start, end] = range.split('-').map(Number);
-                    nodes.push({ type: 'emote', val: `https://static-cdn.jtvnw.net/emoticons/v2/${id}/default/dark/3.0`, start, end });
+                    nodes.push({
+                        type: 'emote',
+                        val: `https://static-cdn.jtvnw.net/emoticons/v2/${id}/default/dark/3.0`,
+                        start,
+                        end
+                    });
                 });
             });
         }
         nodes.sort((a, b) => a.start - b.start);
-        let result: Fragment[] = [];
+
+        const result: Fragment[] = [];
         let cur = 0;
 
         const processText = (str: string) => {
-            str.split(/(\s+)/).forEach(word => {
+            str.split(/(\s+)/).forEach((word) => {
                 const clean = word.trim();
-                if (clean && channelEmoteMap.has(clean)) result.push({ type: 'emote', val: channelEmoteMap.get(clean)! });
-                else if (clean && emoteMap.has(clean)) result.push({ type: 'emote', val: emoteMap.get(clean)! });
-                else if (word) result.push({ type: 'text', val: word });
+                if (!clean) { if (word) result.push({ type: 'text', val: word }); return; }
+
+                const stv = emoteMap.get(clean);
+                if (stv) {
+                    result.push({ type: 'emote', val: stv.url, zeroWidth: stv.zeroWidth });
+                    return;
+                }
+                const ffz = channelEmoteMap.get(clean);
+                if (ffz) { result.push({ type: 'emote', val: ffz }); return; }
+
+                result.push({ type: 'text', val: word });
             });
         };
 
-        nodes.forEach(n => {
+        nodes.forEach((n) => {
             if (n.start > cur) processText(text.substring(cur, n.start));
             result.push({ type: 'emote', val: n.val });
             cur = n.end + 1;
@@ -95,35 +154,112 @@
         return result;
     }
 
-    export function addMessage(user: string, text: string, flags: any, extra: any) {
-        const msgId = extra.id || Math.random().toString(36);
-        if (messages.some(m => m.id === msgId)) return;
+    function badgeUrlFor(name: string, version: string): string {
+        return badgeDictionary[`${name}:${version}`] || `https://static-cdn.jtvnw.net/badges/v1/${name}/${version}/2`;
+    }
 
-        const msg: Message = {
-            id: msgId,
-            user,
-            color: extra.userColor || '#FFFFFF',
-            fragments: parseMessage(text, extra.emotes),
-            badgeUrls: extra.userBadges ? Object.entries(extra.userBadges).map(([n, v]) =>
-                badgeDictionary[`${n}:${v}`] || `https://static-cdn.jtvnw.net/badges/v1/${n}/${v}/2`
-            ) : []
+    /**
+     * Обводка для градиентных 7TV-ников. Обычный text-shadow здесь не
+     * подходит (см. комментарий у .username-paint в <style>) — используем
+     * filter: drop-shadow, который корректно обтекает прозрачную заливку.
+     * Собирается в JS, а не в CSS, потому что filter в inline-style
+     * полностью замещает filter из класса, а не складывается с ним — если
+     * бы обводка жила в классе, а тень пейнта в inline-style, тень пейнта
+     * просто стёрла бы обводку.
+     */
+    function usernameOutlineFilter(paintDropShadow: string | undefined): string {
+        const outline = 'drop-shadow(1px 1px 1.5px rgba(0,0,0,1)) drop-shadow(0 0 2px rgba(0,0,0,1))';
+        return paintDropShadow ? `${outline} ${paintDropShadow}` : outline;
+    }
+
+    /**
+     * Кастомные бейджи FFZ, назначенные стримером конкретным зрителям своего
+     * канала (боты и т.п.), плюс кастомный мод/VIP-бейдж канала.
+     */
+    function collectFFZChannelBadges(msg: ChatMessage): string[] {
+        const urls: string[] = [];
+        if (msg.isMod && ffzModBadge) urls.push(ffzModBadge);
+        if (msg.isVip && ffzVipBadge) urls.push(ffzVipBadge);
+        const personal = ffzChannelUserBadges.get(msg.username);
+        if (personal) urls.push(...personal);
+        return urls;
+    }
+
+    export function addMessage(msg: ChatMessage) {
+        if (messages.some((m) => m.id === msg.id)) return;
+
+        const uiMsg: UIMessage = {
+            id: msg.id,
+            username: msg.username,
+            user: msg.displayName,
+            color: msg.color || defaultColorForUser(msg.username),
+            fragments: parseMessage(msg.text, msg.emotes),
+            badgeUrls: [...msg.badges.map((b) => badgeUrlFor(b.name, b.version)), ...collectFFZChannelBadges(msg)]
         };
 
-        messages = [...messages, msg].slice(-30);
+        messages = [...messages, uiMsg].slice(-30);
+
+        if (messageLifetimeMs > 0) {
+            setTimeout(() => { messages = messages.filter((m) => m.id !== uiMsg.id); }, messageLifetimeMs);
+        }
+
+        if (personalCosmeticsEnabled) enrichWithPersonalCosmetics(msg.username, uiMsg.id);
+    }
+
+    /**
+     * Личные плюшки зрителя, не завязанные на конкретный канал:
+     * цвет/бейдж 7TV и персональный (не канальный) бейдж FFZ вроде Supporter.
+     * Резолвятся асинхронно и докладываются в уже отрисованное сообщение,
+     * т.к. ждать их перед показом сообщения не хочется — это лишняя задержка
+     * в живом чате.
+     */
+    async function enrichWithPersonalCosmetics(username: string, msgId: string) {
+        try {
+            const [user, ffzPersonalBadges] = await Promise.all([
+                resolveTwitchUser(username),
+                fetchFFZPersonalBadges(username).catch(() => [])
+            ]);
+
+            const stvCosmetics = user ? await fetch7TVUserCosmetics(user.id) : null;
+
+            if (!stvCosmetics && ffzPersonalBadges.length === 0) return;
+
+            messages = messages.map((m) => {
+                if (m.id !== msgId) return m;
+                return {
+                    ...m,
+                    color: stvCosmetics?.paintColor || m.color,
+                    paintBackgroundImage: stvCosmetics?.paintBackgroundImage,
+                    paintDropShadow: stvCosmetics?.paintDropShadow,
+                    badgeUrls: [
+                        ...m.badgeUrls,
+                        ...(stvCosmetics?.badgeUrl ? [stvCosmetics.badgeUrl] : []),
+                        ...ffzPersonalBadges
+                    ]
+                };
+            });
+        } catch { /* косметика необязательна, тихо игнорируем */ }
+    }
+
+    export function clearUser(username: string) {
+        messages = messages.filter((m) => m.username.toLowerCase() === username.toLowerCase() ? false : true);
+    }
+
+    export function clearAllMessages() {
+        messages = [];
     }
 
     onMount(async () => {
         try {
-            const idRes = await fetch(`https://api.ivr.fi/v2/twitch/user?login=${channel}`);
-            const idData = await idRes.json();
-            if (idData[0]?.id) await loadHelixData(idData[0].id);
-
-            const [stv, ffz] = await Promise.all([
-                fetch7TVEmotesByNickname(channel).catch(() => new Map()),
-                fetchFFZEmotes(channel).catch(() => new Map())
+            const user = await resolveTwitchUser(channel);
+            if (!user) return;
+            await Promise.all([
+                loadBadges(user.id),
+                loadChannelExtras(user.id, user.login)
             ]);
-            emoteMap = new Map([...ffz, ...stv]);
-        } catch (e) { console.error("Chat mount error:", e); }
+        } catch (e) {
+            console.error('Chat mount error:', e);
+        }
     });
 </script>
 
@@ -146,11 +282,23 @@
                     {/each}
                 </span>
 
-                <span class="username" style="color: {m.color}">{m.user}:</span>
+                {#if m.paintBackgroundImage}
+                    <span
+                        class="username username-paint"
+                        style="background-image: {m.paintBackgroundImage}; filter: {usernameOutlineFilter(m.paintDropShadow)}"
+                    >{m.user}:</span>
+                {:else}
+                    <span class="username" style="color: {m.color}">{m.user}:</span>
+                {/if}
 
-                {#each m.fragments as f}
+                {#each m.fragments as f, i}
                     {#if f.type === 'text'}
                         <span class="chat-text">{f.val}</span>
+                    {:else if f.zeroWidth && i > 0}
+                        <span class="emote-stack">
+                            <img src={m.fragments[i - 1].val} class="emote" alt="" style="visibility:hidden" />
+                            <img src={f.val} class="emote overlay" on:error={handleImageError} alt="" />
+                        </span>
                     {:else}
                         <img src={f.val} class="emote" on:error={handleImageError} alt="" />
                     {/if}
@@ -192,7 +340,26 @@
     .username {
         font-weight: 800;
         margin-right: 4px;
-        /*display: inline-block;*/
+    }
+
+    .username-paint {
+        background-clip: text;
+        -webkit-background-clip: text;
+        background-size: cover;
+        background-repeat: no-repeat;
+        color: transparent;
+        -webkit-text-fill-color: transparent;
+        /*
+         * text-shadow рисует чёрную копию формы глифа позади текста — она
+         * не знает, что заливка текста прозрачная, и это чёрное пятно
+         * почти полностью перекрывает градиент изнутри буквы (это и было
+         * на скриншоте: ник залит чёрным, градиент виден только по краям).
+         * filter: drop-shadow() строит тень по итоговым видимым пикселям
+         * элемента, поэтому корректно обводит именно градиент. Обводка
+         * задаётся через filter в template (usernameOutlineFilter), тут
+         * её дублировать не нужно.
+         */
+        text-shadow: none;
     }
 
     .chat-text {
@@ -201,12 +368,10 @@
 
     .badges {
         display: inline;
-        /*vertical-align: middle;*/
     }
 
     .badge {
-        /* Бейджи чуть меньше текста, чтобы не распирали строку */
-        height: calc(var(--chat-fs)); /* * 0.85 */
+        height: var(--chat-fs);
         width: auto;
         margin-right: 4px;
         vertical-align: middle;
@@ -216,11 +381,24 @@
     .emote {
         height: var(--chat-es) !important;
         width: auto !important;
-        /*display: inline-block;*/
         vertical-align: middle;
-
         margin: 0 2px;
         filter: drop-shadow(1px 1px 2px rgba(0,0,0,0.5));
+    }
+
+    .emote-stack {
+        position: relative;
+        display: inline-grid;
+        vertical-align: middle;
+    }
+
+    .emote-stack .emote {
+        grid-area: 1 / 1;
+        margin: 0;
+    }
+
+    .emote-stack .overlay {
+        filter: none;
     }
 
     @keyframes slideIn {

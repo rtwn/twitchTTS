@@ -1,43 +1,202 @@
 /**
- * Сервис для работы с внешними API (Twitch ID, 7TV, FFZ)
+ * Сервис для работы с внешними API (Twitch ID, 7TV, FFZ).
  */
 
-export async function fetch7TVEmotesByNickname(nickname: string) {
-    const emoteMap = new Map<string, string>();
+export interface TwitchUserInfo {
+    id: string;
+    login: string;
+    displayName: string;
+}
+
+const idCache = new Map<string, TwitchUserInfo | null>();
+
+export async function resolveTwitchUser(login: string): Promise<TwitchUserInfo | null> {
+    const key = login.toLowerCase();
+    if (idCache.has(key)) return idCache.get(key)!;
 
     try {
-        // Шаг 1: Получаем числовой ID Twitch через decapi.me
-        // Это избавляет нас от необходимости использовать OAuth токены Helix
-        const idRes = await fetch(`https://decapi.me/twitch/id/${nickname.toLowerCase()}`);
-        const twitchId = await idRes.text();
+        const res = await fetch(`https://api.ivr.fi/v2/twitch/user?login=${encodeURIComponent(key)}`);
+        if (!res.ok) throw new Error(`IVR ${res.status}`);
+        const data = await res.json();
+        const entry = data?.[0];
+        if (!entry?.id) { idCache.set(key, null); return null; }
 
-        // Проверяем, что получили валидный ID (только цифры)
-        if (!/^\d+$/.test(twitchId)) {
-            console.error(`7TV: Не удалось разрешить ник ${nickname} в ID. Ответ: ${twitchId}`);
-            return emoteMap;
-        }
+        const info: TwitchUserInfo = { id: entry.id, login: entry.login, displayName: entry.displayName };
+        idCache.set(key, info);
+        return info;
+    } catch (e) {
+        console.error(`[Twitch] Не удалось получить ID для ${login}:`, e);
+        idCache.set(key, null);
+        return null;
+    }
+}
 
-        // Шаг 2: Получаем данные пользователя 7TV по его Twitch ID
-        // Используем эндпоинт v3/users/twitch/
+export async function fetch7TVEmotesByTwitchId(twitchId: string) {
+    const emoteMap = new Map<string, { url: string; zeroWidth: boolean }>();
+    try {
         const stvRes = await fetch(`https://7tv.io/v3/users/twitch/${twitchId}`);
         if (!stvRes.ok) return emoteMap;
 
         const stvData = await stvRes.json();
-
-        // Шаг 3: Извлекаем смайлы из активного набора (emote_set)
         const emotes = stvData.emote_set?.emotes;
         if (emotes) {
             emotes.forEach((e: any) => {
-                // e.name — код смайла (напр. KEKW), e.id — уникальный ID для CDN
-                // Используем формат webp и размер 2x (оптимально для стрима)
-                emoteMap.set(e.name, `https://cdn.7tv.app/emote/${e.id}/2x.webp`);
+                const zeroWidth = ((e.data?.flags ?? e.flags ?? 0) & 1) === 1;
+                emoteMap.set(e.name, { url: `https://cdn.7tv.app/emote/${e.id}/2x.webp`, zeroWidth });
             });
-            console.log(`[7TV] Загружено ${emotes.length} смайлов для ID ${twitchId}`);
         }
     } catch (e) {
-        console.error("[7TV] Ошибка загрузки:", e);
+        console.error('[7TV] Ошибка загрузки эмоутов канала:', e);
     }
     return emoteMap;
+}
+
+/**
+ * Персональные плюшки 7TV зрителя.
+ *
+ * Реальная форма ответа https://7tv.io/v3/users/twitch/{id} —
+ * `{ user: { style: { color, paint_id, badge_id }, ... } }` — это ПОДТВЕРЖДЕНО
+ * прямым запросом. Никаких вложенных `user.badges`/`user.paints` массивов
+ * с готовыми картинками там нет.
+ *
+ *  - style.color — сплошной цвет ника (int32 RGBA).
+ *  - style.badge_id — картинка бейджа лежит по предсказуемому CDN-пути
+ *    cdn.7tv.app/badge/{id}/2x.webp, доп. запрос не нужен. Схема подтверждена
+ *    как официальными примерами 7TV, так и рабочим прод-оверлеем cyan-chat
+ *    (github.com/Johnnycyan/cyan-chat), который использует ровно этот путь.
+ *  - style.paint_id — сам градиент (цвета/стопы/угол) по этому ID отдаёт
+ *    GraphQL-эндпоинт 7TV (7tv.io/v3/gql), запрос `cosmetics(list: $list)`.
+ *    Раньше я решил, что это требует недокументированного EventAPI
+ *    (постоянный WebSocket + presence), но у cyan-chat нашёлся рабочий
+ *    пример: обычный один POST-запрос по ID пейнта, без всякого WebSocket —
+ *    так и реализовано ниже.
+ */
+export interface SevenTVUserCosmetics {
+    badgeUrl?: string;
+    paintColor?: string;
+    paintBackgroundImage?: string;
+    paintDropShadow?: string;
+}
+
+const cosmeticsCache = new Map<string, SevenTVUserCosmetics | null>();
+
+export async function fetch7TVUserCosmetics(twitchId: string): Promise<SevenTVUserCosmetics | null> {
+    if (cosmeticsCache.has(twitchId)) return cosmeticsCache.get(twitchId)!;
+    try {
+        const res = await fetch(`https://7tv.io/v3/users/twitch/${twitchId}`);
+        if (!res.ok) { cosmeticsCache.set(twitchId, null); return null; }
+        const data = await res.json();
+
+        const style = data.user?.style;
+        const paintColor = typeof style?.color === 'number' ? cssColorFromInt(style.color) : undefined;
+        const badgeUrl = style?.badge_id ? `https://cdn.7tv.app/badge/${style.badge_id}/2x.webp` : undefined;
+
+        let paintBackgroundImage: string | undefined;
+        let paintDropShadow: string | undefined;
+        if (style?.paint_id) {
+            const paint = await fetch7TVPaintById(style.paint_id);
+            if (paint) {
+                paintBackgroundImage = paint.backgroundImage;
+                paintDropShadow = paint.dropShadow;
+            }
+        }
+
+        const cosmetics: SevenTVUserCosmetics = { badgeUrl, paintColor, paintBackgroundImage, paintDropShadow };
+        cosmeticsCache.set(twitchId, cosmetics);
+        return cosmetics;
+    } catch (e) {
+        cosmeticsCache.set(twitchId, null);
+        return null;
+    }
+}
+
+interface SevenTVPaintDetails {
+    backgroundImage: string; // готовое значение для CSS background-image (gradient() или url())
+    dropShadow?: string;     // готовое значение для CSS filter
+}
+
+const paintCache = new Map<string, SevenTVPaintDetails | null>();
+
+const COSMETICS_QUERY = `query GetCosmetics($list: [ObjectID!]) {
+    cosmetics(list: $list) {
+        paints {
+            id
+            function
+            color
+            angle
+            shape
+            image_url
+            repeat
+            stops { at color __typename }
+            shadows { x_offset y_offset radius color __typename }
+            __typename
+        }
+        __typename
+    }
+}`;
+
+async function fetch7TVPaintById(paintId: string): Promise<SevenTVPaintDetails | null> {
+    if (paintCache.has(paintId)) return paintCache.get(paintId)!;
+
+    try {
+        const res = await fetch('https://7tv.io/v3/gql', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                operationName: 'GetCosmetics',
+                variables: { list: [paintId] },
+                query: COSMETICS_QUERY
+            })
+        });
+        if (!res.ok) { paintCache.set(paintId, null); return null; }
+
+        const json = await res.json();
+        const paint = json?.data?.cosmetics?.paints?.[0];
+        if (!paint) { paintCache.set(paintId, null); return null; }
+
+        const dropShadow = (paint.shadows || []).length ? cssDropShadowFromPaint(paint.shadows) : undefined;
+        const backgroundImage = paint.image_url ? `url(${paint.image_url})` : cssGradientFromPaint(paint);
+        if (!backgroundImage) { paintCache.set(paintId, null); return null; }
+
+        const details: SevenTVPaintDetails = { backgroundImage, dropShadow };
+        paintCache.set(paintId, details);
+        return details;
+    } catch (e) {
+        console.error('[7TV] Ошибка загрузки пейнта:', e);
+        paintCache.set(paintId, null);
+        return null;
+    }
+}
+
+function cssGradientFromPaint(paint: any): string | undefined {
+    const stops = (paint.stops || [])
+        .slice()
+        .sort((a: any, b: any) => a.at - b.at)
+        .map((s: any) => `${cssColorFromInt(s.color)} ${(s.at * 100).toFixed(1)}%`)
+        .join(', ');
+    if (!stops) return undefined;
+
+    const repeatPrefix = paint.repeat ? 'repeating-' : '';
+    if (paint.function === 'RADIAL_GRADIENT') {
+        return `${repeatPrefix}radial-gradient(${paint.shape || 'ellipse'}, ${stops})`;
+    }
+    // LINEAR_GRADIENT — дефолт, как и договорились с cyan-chat/Chatterino7
+    return `${repeatPrefix}linear-gradient(${paint.angle ?? 0}deg, ${stops})`;
+}
+
+function cssDropShadowFromPaint(shadows: any[]): string {
+    return shadows
+        .map((s) => `drop-shadow(${s.x_offset}px ${s.y_offset}px ${s.radius}px ${cssColorFromInt(s.color)})`)
+        .join(' ');
+}
+
+function cssColorFromInt(value: number): string {
+    // 7TV хранит цвет как 32-битное RGBA-число
+    const r = (value >> 24) & 0xff;
+    const g = (value >> 16) & 0xff;
+    const b = (value >> 8) & 0xff;
+    const a = (value & 0xff) / 255;
+    return `rgba(${r}, ${g}, ${b}, ${a.toFixed(2)})`;
 }
 
 /**
@@ -46,46 +205,124 @@ export async function fetch7TVEmotesByNickname(nickname: string) {
 export async function fetchFFZEmotes(nickname: string) {
     const emoteMap = new Map<string, string>();
     try {
-        // FFZ все еще позволяет запрашивать данные напрямую по нику (room)
         const res = await fetch(`https://api.frankerfacez.com/v1/room/${nickname.toLowerCase()}`);
         if (!res.ok) return emoteMap;
 
         const data = await res.json();
-
-        // В FFZ смайлы сгруппированы по сетам
         if (data.sets) {
             Object.values(data.sets).forEach((set: any) => {
                 set.emoticons.forEach((e: any) => {
-                    // Берем размер '2' (средний) или '1' (маленький), если '2' нет
                     const url = e.urls['2'] || e.urls['1'];
-                    if (url) {
-                        emoteMap.set(e.name, url.startsWith('http') ? url : `https:${url}`);
-                    }
+                    if (url) emoteMap.set(e.name, url.startsWith('http') ? url : `https:${url}`);
                 });
             });
-            console.log(`[FFZ] Смайлы загружены для комнаты ${nickname}`);
         }
     } catch (e) {
-        console.error("[FFZ] Ошибка загрузки:", e);
+        console.error('[FFZ] Ошибка загрузки:', e);
     }
     return emoteMap;
 }
 
-export async function fetchAllBadges(channelName: string) {
+function normalizeFFZUrl(url: string | undefined | null): string | undefined {
+    if (!url) return undefined;
+    return url.startsWith('http') ? url : `https:${url}`;
+}
+
+let ffzBadgeDictionaryPromise: Promise<Map<number, string>> | null = null;
+
+// Общий на весь сайт словарь всех FFZ-бейджей (id -> картинка), грузим один раз.
+async function getFFZBadgeDictionary(): Promise<Map<number, string>> {
+    if (!ffzBadgeDictionaryPromise) {
+        ffzBadgeDictionaryPromise = (async () => {
+            const dict = new Map<number, string>();
+            try {
+                const res = await fetch('https://api.frankerfacez.com/v1/badges');
+                if (!res.ok) return dict;
+                const data = await res.json();
+                (data.badges || []).forEach((b: any) => {
+                    const url = normalizeFFZUrl(b.urls?.['2'] || b.urls?.['1'] || b.image);
+                    if (url) dict.set(b.id, url);
+                });
+            } catch (e) {
+                console.error('[FFZ] Ошибка загрузки словаря бейджей:', e);
+            }
+            return dict;
+        })();
+    }
+    return ffzBadgeDictionaryPromise;
+}
+
+/**
+ * Бейджи FFZ, назначенные стримером конкретным зрителям в своём канале
+ * (кастомные боты и т.п.), плюс кастомный модераторский/VIP-бейдж канала.
+ * Источник — https://api.frankerfacez.com/v1/room/{channel}, поле
+ * `user_badge_ids` (badge_id -> [twitch-логины]).
+ */
+export interface FFZBadges {
+    moderatorBadgeUrl?: string;
+    vipBadgeUrl?: string;
+    userBadges: Map<string, string[]>;
+}
+
+export async function fetchFFZBadges(nickname: string): Promise<FFZBadges> {
+    const result: FFZBadges = { userBadges: new Map() };
     try {
-        const idRes = await fetch(`https://decapi.me/twitch/id/${channelName}`);
-        const channelId = await idRes.text();
+        const [roomRes, badgeDict] = await Promise.all([
+            fetch(`https://api.frankerfacez.com/v1/room/${nickname.toLowerCase()}`),
+            getFFZBadgeDictionary()
+        ]);
+        if (!roomRes.ok) return result;
+        const data = await roomRes.json();
+        const room = data.room;
+        if (!room) return result;
 
-        // Запрашиваем данные о канале у 7TV (они проксируют Twitch)
-        const res = await fetch(`https://7tv.io/v3/users/twitch/${channelId}`);
-        const data = await res.json();
+        result.moderatorBadgeUrl = normalizeFFZUrl(room.moderator_badge);
+        result.vipBadgeUrl = normalizeFFZUrl(room.vip_badge?.['2'] || room.vip_badge?.['1']);
 
-        const badgeMap = new Map<string, string>();
-
-        // 7TV часто возвращает список активных бейджей в объекте user.style
-        // Но чтобы получить ВООБЩЕ ВСЕ, мы будем использовать их прокси-ссылки
-        return badgeMap;
+        const userBadgeIds: Record<string, string[]> = room.user_badge_ids || {};
+        Object.entries(userBadgeIds).forEach(([badgeId, usernames]) => {
+            const url = badgeDict.get(Number(badgeId));
+            if (!url) return;
+            usernames.forEach((login) => {
+                const key = login.toLowerCase();
+                const list = result.userBadges.get(key) || [];
+                list.push(url);
+                result.userBadges.set(key, list);
+            });
+        });
     } catch (e) {
-        return new Map();
+        console.error('[FFZ] Ошибка загрузки бейджей канала:', e);
+    }
+    return result;
+}
+
+/**
+ * ЛИЧНЫЙ глобальный FFZ-бейдж зрителя (Supporter/Developer/Bot и т.п.) —
+ * это НЕ то же самое, что кастомные бейджи канала выше. Такой бейдж
+ * привязан к самому аккаунту зрителя на FFZ, а не к конкретному каналу,
+ * и отдаётся через /v1/user/{login}, а не через /v1/room/{channel}.
+ * Раньше этот источник вообще не запрашивался, поэтому Supporter не
+ * показывался никогда, вне зависимости от канала.
+ */
+const ffzPersonalBadgeCache = new Map<string, string[]>();
+
+export async function fetchFFZPersonalBadges(login: string): Promise<string[]> {
+    const key = login.toLowerCase();
+    if (ffzPersonalBadgeCache.has(key)) return ffzPersonalBadgeCache.get(key)!;
+
+    try {
+        const [res, dict] = await Promise.all([
+            fetch(`https://api.frankerfacez.com/v1/user/${key}`),
+            getFFZBadgeDictionary()
+        ]);
+        if (!res.ok) { ffzPersonalBadgeCache.set(key, []); return []; }
+        const data = await res.json();
+        const badgeIds: number[] = data.user?.badges || [];
+        const urls = badgeIds.map((id) => dict.get(id)).filter((u): u is string => !!u);
+        ffzPersonalBadgeCache.set(key, urls);
+        return urls;
+    } catch (e) {
+        ffzPersonalBadgeCache.set(key, []);
+        return [];
     }
 }

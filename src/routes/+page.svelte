@@ -70,10 +70,10 @@
         ytMaxLen: 30,
         chat: true,
         tts: true,
-        fontSize: 28,
-        emoteSize: 1.5,
+        fontSize: 24,
+        emoteSize: 2.2,
         outlineSize: 4,
-        spacing: 10,
+        spacing: 8,
         fontWeight: "600",
         fontFamily: "Roboto"
     };
@@ -193,7 +193,7 @@
                 </div>
                 <div class="control">
                     <label>Message Spacing: {config.spacing}px</label>
-                    <input type="range" min="0" max="15" bind:value={config.spacing} />
+                    <input type="range" min="0" max="16" bind:value={config.spacing} />
                 </div>
                 <div class="control">
                     <label>Font Family</label>
