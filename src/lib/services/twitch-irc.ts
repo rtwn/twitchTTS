@@ -28,6 +28,8 @@ export interface ChatMessage {
     isBroadcaster: boolean;
     isSubscriber: boolean;
     isAction: boolean;     // /me сообщение
+    isHighlighted: boolean; // зритель оплатил "Highlight My Message"
+    isFirstMessage: boolean; // первое сообщение этого зрителя в канале
     text: string;
     raw: string;
 }
@@ -279,6 +281,8 @@ export class TwitchIRC {
             isBroadcaster,
             isSubscriber,
             isAction,
+            isHighlighted: t['msg-id'] === 'highlighted-message',
+            isFirstMessage: t['first-msg'] === '1',
             text,
             raw: parsed.trailing
         };

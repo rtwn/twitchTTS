@@ -41,7 +41,17 @@ export async function fetch7TVEmotesByTwitchId(twitchId: string) {
         const emotes = stvData.emote_set?.emotes;
         if (emotes) {
             emotes.forEach((e: any) => {
-                const zeroWidth = ((e.data?.flags ?? e.flags ?? 0) & 1) === 1;
+                // У 7TV v3 ДВА разных поля flags с РАЗНЫМИ битовыми масками:
+                // e.flags — переопределение на уровне конкретного emote-сета
+                // (ActiveEmoteFlagModel), там ZeroWidth это бит 0 (1);
+                // e.data.flags — флаги самого эмоута (EmoteFlagsModel), там
+                // ZeroWidth это бит 8 (256). Раньше проверялась только
+                // base-маска (256), но через & 1 — то есть не тот бит у не
+                // того поля, из-за чего zero-width не срабатывал вообще
+                // никогда и оверлеи всегда рисовались рядом, а не поверх.
+                const overrideZeroWidth = ((e.flags ?? 0) & 1) === 1;
+                const baseZeroWidth = ((e.data?.flags ?? 0) & 256) === 256;
+                const zeroWidth = overrideZeroWidth || baseZeroWidth;
                 emoteMap.set(e.name, { url: `https://cdn.7tv.app/emote/${e.id}/2x.webp`, zeroWidth });
             });
         }

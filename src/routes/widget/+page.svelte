@@ -13,8 +13,16 @@
     const channel = page.url.searchParams.get('channel') || '';
     const chatEnabled = page.url.searchParams.get('chat') !== 'false';
     const ttsEnabled = page.url.searchParams.get('tts') !== 'false';
+    // В превью настроек Chat.svelte сам подставляет демо-сообщения —
+    // реальное IRC-подключение тут не нужно и было бы просто потрачено
+    // впустую на несуществующий/тестовый канал.
+    const previewMode = page.url.searchParams.get('preview') === 'true';
 
     let irc: TwitchIRC | null = null;
+    // Раньше onConnect/onDisconnect у TwitchIRC были в публичном API, но
+    // никем не вызывались — теперь на них строится индикатор "Загрузка
+    // чата..." в самом Chat.svelte.
+    let ircConnected = false;
 
     function parseCommand(msg: ChatMessage): { command: string; rest: string } | null {
         if (!msg.text.startsWith('!')) return null;
@@ -25,9 +33,12 @@
     }
 
     onMount(() => {
-        if (!channel) return;
+        if (!channel || previewMode) return;
 
         irc = new TwitchIRC();
+
+        irc.onConnect(() => { ircConnected = true; });
+        irc.onDisconnect(() => { ircConnected = false; });
 
         irc.onMessage((msg) => {
             if (chatEnabled && chatRef) chatRef.addMessage(msg);
@@ -61,7 +72,7 @@
 {/if}
 
 {#if chatEnabled}
-    <Chat bind:this={chatRef} {channel} />
+    <Chat bind:this={chatRef} {channel} ircConnected={previewMode || ircConnected} />
 {/if}
 
 <style>

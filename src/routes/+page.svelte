@@ -1,6 +1,8 @@
 <script lang="ts">
     import VoiceSelect from '$lib/components/VoiceSelect.svelte';
+    import FontSelect from '$lib/components/FontSelect.svelte';
     import { fade, fly } from 'svelte/transition';
+    import { browser } from '$app/environment';
 
     // Список шрифтов
     const fonts = [
@@ -13,10 +15,26 @@
         { name: 'Comfortaa', family: '"Comfortaa", cursive' }
     ];
 
-    // Массив сообщений для реалистичного Live Preview
-    let previewMessages = [
-        { user: "bicme", color: "#9146ff", text: "Pseudamaurops calcaratus is a species of beetle. <img src='https://cdn.7tv.app/emote/01G6SFGEA80006H81S3K13JXS1/4x.avif' class='p-emote' alt='BEETLEJUICE' />"},
-        { user: "Zonlex", color: "#00ff7f", text: "This font looks amazing! <img src='https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0' class='p-emote' alt='Kappa' />" }
+    // Пресеты размеров вместо голых слайдеров — раньше было неясно, какой
+    // именно результат даст "23px" или "2.4em" без реально работающего
+    // превью. Теперь конкретные подписанные варианты, и число видно прямо
+    // на кнопке. 2.2em выбран как "1x", т.к. это ближе всего к тому, каким
+    // смайл выглядит "как есть" рядом с текстом (без искусственного зума).
+    const FONT_SIZE_PRESETS = [
+        { label: 'Small', value: 22 },
+        { label: 'Medium', value: 28 },
+        { label: 'Large', value: 36 }
+    ];
+    const SHADOW_PRESETS = [
+        { label: 'Off', value: 0 },
+        { label: 'Small', value: 2 },
+        { label: 'Medium', value: 4 },
+        { label: 'Large', value: 8 }
+    ];
+    const EMOTE_SIZE_PRESETS = [
+        { label: '1x', value: 2.2 },
+        { label: '2x', value: 4.4 },
+        { label: '3x', value: 6.6 }
     ];
 
     function generateTTSLink(origin: string, config: any) {
@@ -33,6 +51,15 @@
             url.searchParams.set('fontWeight', config.fontWeight);
             url.searchParams.set('font', config.fontFamily);
             url.searchParams.set('outlineColor', '#000000');
+
+            url.searchParams.set('showBadges', config.showBadges.toString());
+            url.searchParams.set('showStvColors', config.showStvColors.toString());
+            url.searchParams.set('showHighlighted', config.showHighlighted.toString());
+            url.searchParams.set('showFirstTimeChatter', config.showFirstTimeChatter.toString());
+
+            url.searchParams.set('hideCommands', config.hideCommands.toString());
+            if (config.commandPrefixes.trim()) url.searchParams.set('commandPrefixes', config.commandPrefixes);
+            url.searchParams.set('hideBots', config.hideBots.toString());
         }
 
         if (config.tts) {
@@ -70,12 +97,19 @@
         ytMaxLen: 30,
         chat: true,
         tts: true,
-        fontSize: 24,
+        fontSize: 28,
         emoteSize: 2.2,
         outlineSize: 4,
-        spacing: 8,
+        spacing: 10,
         fontWeight: "600",
-        fontFamily: "Roboto"
+        fontFamily: "Roboto",
+        showBadges: true,
+        showStvColors: true,
+        showHighlighted: true,
+        showFirstTimeChatter: true,
+        hideCommands: false,
+        commandPrefixes: "!,#,=",
+        hideBots: true
     };
 
     let whiteInput = "";
@@ -107,6 +141,10 @@
             showToastMsg("Please enter your Twitch channel name.");
             return;
         }
+        if (!config.chat && !config.tts) {
+            showToastMsg("Enable at least Chat Overlay or TTS to generate a link.");
+            return;
+        }
         const link = generateTTSLink(window.location.origin, config);
         const success = await copyToClipboard(link);
         if (success) {
@@ -130,6 +168,39 @@
         buttonClicked = true;
         setTimeout(() => buttonClicked = false, 200);
     }
+
+    // ---- Live Preview ----
+    // Превью — это iframe с НАСТОЯЩИМ /widget?...&preview=true (Chat.svelte
+    // в этом режиме сам подставляет демо-сообщения без единого сетевого
+    // запроса к Twitch), отмасштабированный так, будто окно превью — кусок
+    // реального холста OBS. Ширину этого "холста" можно подстроить под свой
+    // реальный Browser Source — раньше она была жёстко зашита в 1920px, и
+    // если у кого-то реальный Browser Source не 1920px шириной (или окно
+    // браузера, в котором открывали ссылку напрямую, было другой ширины),
+    // пропорции в превью и "в реальности" не совпадали.
+    let previewRefWidth = 800;
+    const PREVIEW_REF_HEIGHT = 420;
+
+    let previewContainerWidth = 0;
+    $: previewScale = previewContainerWidth > 0 ? previewContainerWidth / previewRefWidth : 0.001;
+
+    let previewSrc = '';
+    let previewDebounceTimer: ReturnType<typeof setTimeout>;
+
+    function updatePreviewSrc() {
+        if (!browser) return;
+        clearTimeout(previewDebounceTimer);
+        previewDebounceTimer = setTimeout(() => {
+            const url = new URL(generateTTSLink(window.location.origin, { ...config, channel: config.channel || 'preview', chat: true, tts: false }));
+            url.searchParams.set('preview', 'true');
+            previewSrc = url.toString();
+        }, 250);
+    }
+
+    // Реактивная зависимость от всего config — перегенерирует превью при
+    // изменении любой из настроек чата (Svelte 4 отслеживает присвоения
+    // вида config.x = ..., которые делает bind:value/bind:checked).
+    $: config, updatePreviewSrc();
 </script>
 
 <svelte:head>
@@ -158,57 +229,85 @@
 
     {#if config.chat}
         <div class="preview-box" transition:fly={{ y: -10, duration: 300 }}>
-            <div class="preview-label">Live Preview:</div>
-            <div class="chat-preview" style="
-                --p-fs: {config.fontSize}px;
-                --p-es: {config.emoteSize}em;
-                --p-os: {config.outlineSize}px;
-                --p-sp: {config.spacing}px;
-                --p-fw: {config.fontWeight};
-                --p-font: {fonts.find(f => f.name === config.fontFamily)?.family || 'sans-serif'};
-            ">
-                {#each previewMessages as msg}
-                    <div class="preview-msg">
-                        <span class="p-user" style="color: {msg.color}">{msg.user}:</span>
-                        <span class="p-text">{@html msg.text}</span>
-                    </div>
-                {/each}
+            <div class="preview-label-row">
+                <div class="preview-label">Live Preview</div>
+                <label class="preview-ref-width">
+                    Reference OBS width
+                    <input type="number" min="640" max="3840" step="10" bind:value={previewRefWidth} />
+                </label>
+            </div>
+            <div class="preview-frame-outer" bind:clientWidth={previewContainerWidth}>
+                <div class="preview-frame-wrap" style="height: {Math.round(PREVIEW_REF_HEIGHT * previewScale)}px;">
+                    {#if previewSrc}
+                        <iframe
+                            title="Chat preview"
+                            src={previewSrc}
+                            width={previewRefWidth}
+                            height={PREVIEW_REF_HEIGHT}
+                            style="transform: scale({previewScale});"
+                        ></iframe>
+                    {/if}
+                </div>
             </div>
         </div>
 
         <div class="settings-block" transition:fly={{ y: -10, duration: 300 }}>
             <hr />
-            <div class="settings-grid">
-                <div class="control">
-                    <label>Font Size: {config.fontSize}px</label>
-                    <input type="range" min="12" max="40" bind:value={config.fontSize} />
+
+            <div class="control">
+                <label>Text Size</label>
+                <div class="segmented">
+                    {#each FONT_SIZE_PRESETS as p}
+                        <button type="button" class:selected={config.fontSize === p.value} on:click={() => config.fontSize = p.value}>{p.label} ({p.value}px)</button>
+                    {/each}
                 </div>
-                <div class="control">
-                    <label>Emote Scale: {config.emoteSize}x</label>
-                    <input type="range" min="1.5" max="3" step="0.1" bind:value={config.emoteSize} />
+            </div>
+            <div class="control">
+                <label>Text Shadow</label>
+                <div class="segmented">
+                    {#each SHADOW_PRESETS as p}
+                        <button type="button" class:selected={config.outlineSize === p.value} on:click={() => config.outlineSize = p.value}>{p.label}</button>
+                    {/each}
                 </div>
-                <div class="control">
-                    <label>Shadow Blur: {config.outlineSize}px</label>
-                    <input type="range" min="0" max="10" bind:value={config.outlineSize} />
+            </div>
+            <div class="control">
+                <label>Emote Size</label>
+                <div class="segmented">
+                    {#each EMOTE_SIZE_PRESETS as p}
+                        <button type="button" class:selected={config.emoteSize === p.value} on:click={() => config.emoteSize = p.value}>{p.label}</button>
+                    {/each}
                 </div>
-                <div class="control">
-                    <label>Message Spacing: {config.spacing}px</label>
-                    <input type="range" min="0" max="16" bind:value={config.spacing} />
-                </div>
-                <div class="control">
-                    <label>Font Family</label>
-                    <select bind:value={config.fontFamily}>
-                        {#each fonts as font}<option value={font.name}>{font.name}</option>{/each}
-                    </select>
-                </div>
-                <div class="control">
-                    <label>Font Weight</label>
-                    <select bind:value={config.fontWeight}>
-                        <option value="400">Regular</option>
-                        <option value="600">Semi-Bold</option>
-                        <option value="800">Extra-Bold</option>
-                    </select>
-                </div>
+            </div>
+            <div class="control">
+                <label>Message Spacing: {config.spacing}px</label>
+                <input type="range" min="0" max="15" bind:value={config.spacing} />
+            </div>
+
+            <FontSelect bind:selected={config.fontFamily} {fonts} />
+
+            <div class="control">
+                <label>Font Weight</label>
+                <select bind:value={config.fontWeight}>
+                    <option value="400">Regular</option>
+                    <option value="600">Semi-Bold</option>
+                    <option value="800">Extra-Bold</option>
+                </select>
+            </div>
+
+            <hr />
+            <div class="form-group checkbox-container">
+                <div class="switch-row"><span>Show badges</span><label class="switch"><input type="checkbox" bind:checked={config.showBadges} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Show 7TV colors/paints</span><label class="switch"><input type="checkbox" bind:checked={config.showStvColors} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Highlight "Highlighted Messages"</span><label class="switch"><input type="checkbox" bind:checked={config.showHighlighted} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Highlight first-time chatters</span><label class="switch"><input type="checkbox" bind:checked={config.showFirstTimeChatter} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Hide known bots (Nightbot, StreamElements...)</span><label class="switch"><input type="checkbox" bind:checked={config.hideBots} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Hide commands (!, #, = ...)</span><label class="switch"><input type="checkbox" bind:checked={config.hideCommands} /><span class="slider"></span></label></div>
+                {#if config.hideCommands}
+                    <div class="yt-sub-settings" transition:fade>
+                        <label for="commandPrefixes">Command prefixes (comma-separated):</label>
+                        <input id="commandPrefixes" type="text" bind:value={config.commandPrefixes} placeholder="!,#,=" />
+                    </div>
+                {/if}
             </div>
         </div>
     {/if}
@@ -275,43 +374,83 @@
     .black-list-tag { background: #444; color: #fff; border-color: #333; }
     .tag-badge button { background: none; border: none; color: inherit; font-size: 16px; cursor: pointer; padding: 0; opacity: 0.6; }
 
-    /* PREVIEW */
-    .preview-box { background: #3a3a3a; border-radius: 10px; padding: 25px 20px; margin: 20px 0 10px; border: 2px solid #7c3aed; overflow: hidden; }
-    .preview-label { color: #a78bfa; font-size: 10px; font-weight: bold; text-transform: uppercase; margin-bottom: 15px; font-family: sans-serif; }
-
-    .preview-msg { margin-bottom: var(--p-sp); display: block; line-height: 1.2; word-wrap: break-word; overflow-wrap: break-word; }
-
-    .p-user, .p-text {
-        font-family: var(--p-font), sans-serif;
-        font-size: var(--p-fs);
-        font-weight: var(--p-fw);
+    /* Сегментированные группы пресетов размера (вместо голых слайдеров) */
+    .control { margin-bottom: 16px; }
+    .segmented { display: flex; gap: 6px; flex-wrap: wrap; }
+    .segmented button {
+        flex: 1;
+        min-width: 70px;
+        padding: 8px 10px;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        background: white;
+        color: #374151;
+        font-size: 0.85rem;
+        cursor: pointer;
+        transition: 0.15s;
+    }
+    .segmented button:hover { border-color: #c4b5fd; }
+    .segmented button.selected {
+        background: #7c3aed;
+        border-color: #7c3aed;
         color: white;
-        text-shadow: calc(var(--p-os) / 4) calc(var(--p-os) / 4) var(--p-os) rgba(0,0,0,1), 0px 0px calc(var(--p-os) * 1.5) rgba(0,0,0,1);
-        vertical-align: middle;
+        font-weight: 600;
     }
 
-    .p-user {
-        font-weight: 800;
-        margin-right: 8px;
-        display: inline-block;
+    /* PREVIEW */
+    .preview-box { background: #3a3a3a; border-radius: 10px; padding: 16px; margin: 20px 0 10px; border: 2px solid #7c3aed; }
+    .preview-label-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; gap: 12px; flex-wrap: wrap; }
+    .preview-label { color: #a78bfa; font-size: 10px; font-weight: bold; text-transform: uppercase; font-family: sans-serif; }
+    .preview-ref-width {
+        display: flex; align-items: center; gap: 6px;
+        color: #8b8b9a; font-size: 11px; font-weight: normal; text-transform: none;
+    }
+    .preview-ref-width input {
+        width: 70px; padding: 3px 6px; font-size: 12px;
+        border: 1px solid #555; border-radius: 4px; background: #222; color: #eee;
     }
 
-    .p-text {
-        display: inline;
-        white-space: pre-wrap;
+    /*
+     * Реальный /widget рендерится в iframe шириной previewRefWidth (как
+     * будто это полноразмерный холст OBS), затем весь iframe целиком
+     * масштабируется вниз transform:scale, чтобы влезть в панель настроек.
+     * Так пропорции шрифта/эмоутов относительно ширины оверлея всегда
+     * совпадают с тем, что реально увидят зрители в OBS — раньше превью
+     * сравнивало px шрифта с шириной панели настроек, из-за чего размеры
+     * выглядели не так, как в реально открытой /widget вкладке.
+     *
+     * previewContainerWidth раньше измерялся на самом .preview-box, у
+     * которого есть padding — то есть реальная доступная ширина для iframe
+     * была на 2×padding меньше измеренного значения, и scale получался
+     * чуть завышенным. Теперь clientWidth меряется на .preview-frame-outer —
+     * прямом потомке без собственного padding, это и есть настоящая
+     * доступная ширина.
+     */
+    .preview-frame-outer {
+        width: 100%;
+    }
+    .preview-frame-wrap {
+        position: relative;
+        overflow: hidden;
+        border-radius: 6px;
+        background-image:
+            linear-gradient(45deg, #2a2a2a 25%, transparent 25%),
+            linear-gradient(-45deg, #2a2a2a 25%, transparent 25%),
+            linear-gradient(45deg, transparent 75%, #2a2a2a 75%),
+            linear-gradient(-45deg, transparent 75%, #2a2a2a 75%);
+        background-size: 20px 20px;
+        background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+        background-color: #333;
+    }
+    .preview-frame-wrap iframe {
+        position: absolute;
+        top: 0;
+        left: 0;
+        border: none;
+        transform-origin: top left;
+        pointer-events: none;
     }
 
-    /* Эмодзи в превью теперь будут соответствовать масштабу и центровке */
-    .p-text :global(.p-emote) {
-        height: var(--p-es) !important;
-        width: auto !important;
-        vertical-align: middle;
-        display: inline-block;
-        margin: 0 2px;
-        filter: drop-shadow(1px 1px 2px rgba(0,0,0,0.5));
-    }
-
-    .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 10px; }
     input[type="range"] { width: 100%; accent-color: #7c3aed; }
     .module-selector { background: #f9fafb; padding: 16px; border-radius: 8px; border: 1px solid #f3f4f6; }
     .yt-sub-settings { margin-left: 10px; margin-top: 10px; border-left: 2px solid #7c3aed; padding-left: 15px; }
