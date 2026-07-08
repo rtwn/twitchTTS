@@ -6,6 +6,7 @@
         fetchFFZEmotes,
         fetchFFZBadges,
         fetchFFZPersonalBadges,
+        fetchBTTVChannelBots,
         preloadSevenTVPaintCatalog,
         resolveTwitchUser
     } from '$lib/services/twitch-api';
@@ -44,17 +45,15 @@
     const commandPrefixes = (urlParams.get('commandPrefixes') || '!,#,=')
         .split(',').map((p) => p.trim()).filter(Boolean);
 
-    // Автоопределение известных чат-ботов — без ручного вписывания ников.
-    // Список — самые распространённые публичные чат-боты Twitch; их логины
-    // фиксированы и не меняются от канала к каналу, поэтому просто держим
-    // такой список, а не просим стримера перечислять их вручную.
+    // Автоопределение ботов канала — без ручного вписывания ников. Источник —
+    // BetterTTV: стример сам настраивает список ботов своего канала в своём
+    // дэшборде (betterttv.com/dashboard/bots), и именно на основании этого
+    // BTTV рисует им иконку-робота в чате. Мы читаем тот же список, а не
+    // держим свой статичный набор "самых популярных" ботов — если стример
+    // не настраивал его в BTTV, список будет пустым, и это честно отражает
+    // то, что сам BTTV тоже не может определить ботов такого канала.
     const hideBots = urlParams.get('hideBots') !== 'false';
-    const KNOWN_BOTS = new Set([
-        'nightbot', 'streamelements', 'streamlabs', 'moobot', 'fossabot',
-        'wizebot', 'deepbot', 'phantombot', 'ankhbot', 'scorpbot', 'sery_bot',
-        'commanderroot', 'soundalerts', 'blerp', 'own3d', 'restreambot',
-        'botisimo', 'coebot', 'stay_hydrated_bot', 'kofistreambot', 'streamholics'
-    ]);
+    let channelBots = new Set<string>();
 
     // Превью-режим для страницы настроек: рендерит несколько демо-сообщений
     // без единого сетевого запроса или подключения к Twitch — используется,
@@ -141,16 +140,24 @@
     }
 
     async function loadChannelExtras(twitchId: string, login: string) {
-        const [ffzEmotes, stv, ffzBadges] = await Promise.all([
+        const [ffzEmotes, stv, ffzBadges, bttvBots] = await Promise.all([
             fetchFFZEmotes(login).catch(() => new Map<string, string>()),
             fetch7TVEmotesByTwitchId(twitchId).catch(() => new Map()),
-            fetchFFZBadges(login).catch(() => ({ userBadges: new Map() } as import('$lib/services/twitch-api').FFZBadges))
+            fetchFFZBadges(login).catch(() => ({ userBadges: new Map(), botUsers: new Set() } as import('$lib/services/twitch-api').FFZBadges)),
+            fetchBTTVChannelBots(twitchId).catch(() => [] as string[])
         ]);
         channelEmoteMap = ffzEmotes;
         emoteMap = stv as Map<string, { url: string; zeroWidth: boolean }>;
         ffzModBadge = ffzBadges.moderatorBadgeUrl;
         ffzVipBadge = ffzBadges.vipBadgeUrl;
         ffzChannelUserBadges = ffzBadges.userBadges;
+        // Три независимых источника "это бот": свой канальный бейдж FFZ
+        // (bot, id=2 — стример явно назначает через FFZ), список ботов
+        // канала из BTTV (стример настраивает в betterttv.com/dashboard/
+        // bots) и официальный Twitch Chat Bot badge (проверяется прямо в
+        // addMessage по тегу badges — тем ботам, что уже перешли на новый
+        // Send Chat Message API, отдельный запрос не нужен).
+        channelBots = new Set([...bttvBots, ...ffzBadges.botUsers]);
     }
 
     /**
@@ -276,7 +283,14 @@
 
     export function addMessage(msg: ChatMessage) {
         if (messages.some((m) => m.id === msg.id)) return;
-        if (hideBots && KNOWN_BOTS.has(msg.username)) return;
+        // Официальный Twitch "Chat Bot" badge (появился в 2025, set_id
+        // "bot-badge") — приходит прямо в теге badges вместе со всеми
+        // остальными, отдельный запрос не нужен. Пока что его получают
+        // только боты, перешедшие на новый Send Chat Message API — большая
+        // часть старых популярных ботов (Nightbot и т.п.) им ещё не
+        // помечена, поэтому это дополняет, а не заменяет BTTV/FFZ-списки.
+        const isNativeBot = msg.badges.some((b) => b.name === 'bot-badge');
+        if (hideBots && (isNativeBot || channelBots.has(msg.username))) return;
         if (hideCommands && commandPrefixes.some((p) => msg.text.startsWith(p))) return;
 
         const color = msg.color || defaultColorForUser(msg.username);
@@ -318,12 +332,22 @@
         try {
             const resolvedId = userId || (await resolveTwitchUser(username))?.id;
 
-            const [stvCosmetics, ffzPersonalBadges] = await Promise.all([
+            const [stvCosmetics, ffzPersonal] = await Promise.all([
                 resolvedId ? fetch7TVUserCosmetics(resolvedId) : Promise.resolve(null),
-                fetchFFZPersonalBadges(username).catch(() => [])
+                fetchFFZPersonalBadges(username).catch(() => ({ urls: [], isBot: false }))
             ]);
 
-            if (!stvCosmetics && ffzPersonalBadges.length === 0) return;
+            // Личный (не канальный) FFZ-бейдж bot узнаётся только сейчас,
+            // асинхронно — раньше момента показа сообщения это никак не
+            // проверить. Раз пользователь всё-таки оказался ботом, а
+            // скрытие ботов включено — просто убираем уже отрисованное
+            // сообщение, а не оставляем его висеть с чужим бейджем.
+            if (hideBots && ffzPersonal.isBot) {
+                messages = messages.filter((m) => m.id !== msgId);
+                return;
+            }
+
+            if (!stvCosmetics && ffzPersonal.urls.length === 0) return;
 
             const finalColor = showStvColors ? stvCosmetics?.paintColor : undefined;
             if (finalColor) userColorMap.set(username, finalColor);
@@ -338,7 +362,7 @@
                     badgeUrls: [
                         ...m.badgeUrls,
                         ...(stvCosmetics?.badgeUrl ? [stvCosmetics.badgeUrl] : []),
-                        ...ffzPersonalBadges
+                        ...ffzPersonal.urls
                     ]
                 };
             });
@@ -634,16 +658,29 @@
      * или несколько zero-width оверлеев 7TV поверх него). grid укладывает
      * все img в одну и ту же область (grid-area: 1/1), поэтому они рисуются
      * друг на друге, а не рядом.
+     *
+     * Базовый смайл и оверлей почти никогда не совпадают по естественным
+     * пропорциям (ширина у них разная даже при одинаковой var(--chat-es)
+     * высоте) — ячейка грида подстраивается под САМУЮ большую картинку, а
+     * без явного центрирования браузер прижимает более мелкие картинки к
+     * левому/верхнему краю этой ячейки, а не к её середине. justify-items/
+     * align-items: center здесь чинят именно это — все картинки в стопке
+     * центрируются относительно самой большой, будь то оверлей или обычный
+     * смайл.
      */
     .emote-stack {
         position: relative;
         display: inline-grid;
+        justify-items: center;
+        align-items: center;
         vertical-align: middle;
         margin: 0 2px;
     }
 
     .emote-stack .emote {
         grid-area: 1 / 1;
+        justify-self: center;
+        align-self: center;
         margin: 0;
     }
 

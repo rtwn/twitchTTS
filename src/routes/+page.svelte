@@ -100,7 +100,7 @@
         fontSize: 28,
         emoteSize: 2.2,
         outlineSize: 4,
-        spacing: 10,
+        spacing: 8,
         fontWeight: "600",
         fontFamily: "Roboto",
         showBadges: true,
@@ -300,7 +300,7 @@
                 <div class="switch-row"><span>Show 7TV colors/paints</span><label class="switch"><input type="checkbox" bind:checked={config.showStvColors} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Highlight "Highlighted Messages"</span><label class="switch"><input type="checkbox" bind:checked={config.showHighlighted} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Highlight first-time chatters</span><label class="switch"><input type="checkbox" bind:checked={config.showFirstTimeChatter} /><span class="slider"></span></label></div>
-                <div class="switch-row"><span>Hide known bots (Nightbot, StreamElements...)</span><label class="switch"><input type="checkbox" bind:checked={config.hideBots} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Hide bots (auto-detected via Twitch/FFZ/BTTV)</span><label class="switch"><input type="checkbox" bind:checked={config.hideBots} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Hide commands (!, #, = ...)</span><label class="switch"><input type="checkbox" bind:checked={config.hideCommands} /><span class="slider"></span></label></div>
                 {#if config.hideCommands}
                     <div class="yt-sub-settings" transition:fade>

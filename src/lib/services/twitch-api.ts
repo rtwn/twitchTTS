@@ -31,6 +31,27 @@ export async function resolveTwitchUser(login: string): Promise<TwitchUserInfo |
     }
 }
 
+/**
+ * Список ботов ТЕКУЩЕГО канала из BetterTTV. Это не угадывание по
+ * статичному списку популярных имён — BTTV даёт стримеру настроить в своём
+ * дэшборде (betterttv.com/dashboard/bots), кто из аккаунтов в его чате бот;
+ * именно на основании этого списка расширение BTTV рисует боту иконку-
+ * робота рядом с ником. Соответственно, если стример там ничего не
+ * настраивал, список будет пустым — это не наша недоработка, а честное
+ * отражение того, что БТTV не знает о ботах в этом канале.
+ */
+export async function fetchBTTVChannelBots(twitchId: string): Promise<string[]> {
+    try {
+        const res = await fetch(`https://api.betterttv.net/3/cached/users/twitch/${twitchId}`);
+        if (!res.ok) return [];
+        const data = await res.json();
+        return (data.bots || []).map((b: string) => b.toLowerCase());
+    } catch (e) {
+        console.error('[BTTV] Не удалось загрузить список ботов канала:', e);
+        return [];
+    }
+}
+
 export async function fetch7TVEmotesByTwitchId(twitchId: string) {
     const emoteMap = new Map<string, { url: string; zeroWidth: boolean }>();
     try {
@@ -299,20 +320,22 @@ function normalizeFFZUrl(url: string | undefined | null): string | undefined {
     return url.startsWith('http') ? url : `https:${url}`;
 }
 
-let ffzBadgeDictionaryPromise: Promise<Map<number, string>> | null = null;
+let ffzBadgeDictionaryPromise: Promise<Map<number, { url: string; name: string }>> | null = null;
 
-// Общий на весь сайт словарь всех FFZ-бейджей (id -> картинка), грузим один раз.
-async function getFFZBadgeDictionary(): Promise<Map<number, string>> {
+// Общий на весь сайт словарь всех FFZ-бейджей (id -> картинка+имя), грузим один раз.
+// Имя нужно, чтобы находить официальный бейдж "bot" по названию, а не по
+// захардкоженному числовому id (у FFZ он равен 2, но искать по имени надёжнее).
+async function getFFZBadgeDictionary(): Promise<Map<number, { url: string; name: string }>> {
     if (!ffzBadgeDictionaryPromise) {
         ffzBadgeDictionaryPromise = (async () => {
-            const dict = new Map<number, string>();
+            const dict = new Map<number, { url: string; name: string }>();
             try {
                 const res = await fetch('https://api.frankerfacez.com/v1/badges');
                 if (!res.ok) return dict;
                 const data = await res.json();
                 (data.badges || []).forEach((b: any) => {
                     const url = normalizeFFZUrl(b.urls?.['2'] || b.urls?.['1'] || b.image);
-                    if (url) dict.set(b.id, url);
+                    if (url) dict.set(b.id, { url, name: b.name || '' });
                 });
             } catch (e) {
                 console.error('[FFZ] Ошибка загрузки словаря бейджей:', e);
@@ -328,15 +351,22 @@ async function getFFZBadgeDictionary(): Promise<Map<number, string>> {
  * (кастомные боты и т.п.), плюс кастомный модераторский/VIP-бейдж канала.
  * Источник — https://api.frankerfacez.com/v1/room/{channel}, поле
  * `user_badge_ids` (badge_id -> [twitch-логины]).
+ *
+ * Среди стандартных FFZ-бейджей есть официальный "bot" (id=2, "replaces":
+ * "moderator" — FFZ показывает его вместо модераторского для тех, кого
+ * стример явно пометил ботом через FFZ). Это тот же самый источник данных,
+ * что мы и так уже читаем ради отображения бейджей — просто дополнительно
+ * достаём из него множество логинов с этим конкретным бейджем.
  */
 export interface FFZBadges {
     moderatorBadgeUrl?: string;
     vipBadgeUrl?: string;
     userBadges: Map<string, string[]>;
+    botUsers: Set<string>;
 }
 
 export async function fetchFFZBadges(nickname: string): Promise<FFZBadges> {
-    const result: FFZBadges = { userBadges: new Map() };
+    const result: FFZBadges = { userBadges: new Map(), botUsers: new Set() };
     try {
         const [roomRes, badgeDict] = await Promise.all([
             fetch(`https://api.frankerfacez.com/v1/room/${nickname.toLowerCase()}`),
@@ -352,13 +382,14 @@ export async function fetchFFZBadges(nickname: string): Promise<FFZBadges> {
 
         const userBadgeIds: Record<string, string[]> = room.user_badge_ids || {};
         Object.entries(userBadgeIds).forEach(([badgeId, usernames]) => {
-            const url = badgeDict.get(Number(badgeId));
-            if (!url) return;
+            const badge = badgeDict.get(Number(badgeId));
+            if (!badge) return;
             usernames.forEach((login) => {
                 const key = login.toLowerCase();
                 const list = result.userBadges.get(key) || [];
-                list.push(url);
+                list.push(badge.url);
                 result.userBadges.set(key, list);
+                if (badge.name === 'bot') result.botUsers.add(key);
             });
         });
     } catch (e) {
@@ -375,9 +406,9 @@ export async function fetchFFZBadges(nickname: string): Promise<FFZBadges> {
  * Раньше этот источник вообще не запрашивался, поэтому Supporter не
  * показывался никогда, вне зависимости от канала.
  */
-const ffzPersonalBadgeCache = new Map<string, string[]>();
+const ffzPersonalBadgeCache = new Map<string, { urls: string[]; isBot: boolean }>();
 
-export async function fetchFFZPersonalBadges(login: string): Promise<string[]> {
+export async function fetchFFZPersonalBadges(login: string): Promise<{ urls: string[]; isBot: boolean }> {
     const key = login.toLowerCase();
     if (ffzPersonalBadgeCache.has(key)) return ffzPersonalBadgeCache.get(key)!;
 
@@ -386,14 +417,16 @@ export async function fetchFFZPersonalBadges(login: string): Promise<string[]> {
             fetch(`https://api.frankerfacez.com/v1/user/${key}`),
             getFFZBadgeDictionary()
         ]);
-        if (!res.ok) { ffzPersonalBadgeCache.set(key, []); return []; }
+        if (!res.ok) { const empty = { urls: [], isBot: false }; ffzPersonalBadgeCache.set(key, empty); return empty; }
         const data = await res.json();
         const badgeIds: number[] = data.user?.badges || [];
-        const urls = badgeIds.map((id) => dict.get(id)).filter((u): u is string => !!u);
-        ffzPersonalBadgeCache.set(key, urls);
-        return urls;
+        const badges = badgeIds.map((id) => dict.get(id)).filter((b): b is { url: string; name: string } => !!b);
+        const result = { urls: badges.map((b) => b.url), isBot: badges.some((b) => b.name === 'bot') };
+        ffzPersonalBadgeCache.set(key, result);
+        return result;
     } catch (e) {
-        ffzPersonalBadgeCache.set(key, []);
-        return [];
+        const empty = { urls: [], isBot: false };
+        ffzPersonalBadgeCache.set(key, empty);
+        return empty;
     }
 }
