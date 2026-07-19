@@ -63,12 +63,12 @@
 
     let chatConfig = {
         fontSize: urlParams.get('fontSize') || '28px',
-        emoteSize: urlParams.get('emoteSize') || '1.5em',
-        badgeSize: urlParams.get('badgeSize') || '1em',
+        emoteSize: urlParams.get('emoteSize') || '2em',
+        badgeSize: urlParams.get('badgeSize') || '2em',
         fontWeight: urlParams.get('fontWeight') || '600',
         outlineColor: '#000000',
         outlineSize: urlParams.get('outlineSize') || '4px',
-        spacing: urlParams.get('spacing') || '10px',
+        spacing: urlParams.get('spacing') || '8px',
         fontFamily: urlParams.get('font') || 'sans-serif'
     };
 

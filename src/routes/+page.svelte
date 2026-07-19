@@ -15,11 +15,6 @@
         { name: 'Comfortaa', family: '"Comfortaa", cursive' }
     ];
 
-    // Пресеты размеров вместо голых слайдеров — раньше было неясно, какой
-    // именно результат даст "23px" или "2.4em" без реально работающего
-    // превью. Теперь конкретные подписанные варианты, и число видно прямо
-    // на кнопке. 2.2em выбран как "1x", т.к. это ближе всего к тому, каким
-    // смайл выглядит "как есть" рядом с текстом (без искусственного зума).
     const FONT_SIZE_PRESETS = [
         { label: 'Small', value: 22 },
         { label: 'Medium', value: 28 },
@@ -32,9 +27,9 @@
         { label: 'Large', value: 8 }
     ];
     const EMOTE_SIZE_PRESETS = [
-        { label: '1x', value: 2.2 },
-        { label: '2x', value: 4.4 },
-        { label: '3x', value: 6.6 }
+        { label: '1x', value: 2 },
+        { label: '2x', value: 4 },
+        { label: '3x', value: 6 }
     ];
 
     function generateTTSLink(origin: string, config: any) {
@@ -98,10 +93,10 @@
         chat: true,
         tts: true,
         fontSize: 28,
-        emoteSize: 2.2,
+        emoteSize: 2,
         outlineSize: 4,
         spacing: 8,
-        fontWeight: "600",
+        fontWeight: "600", //ltr
         fontFamily: "Roboto",
         showBadges: true,
         showStvColors: true,
@@ -170,14 +165,11 @@
     }
 
     // ---- Live Preview ----
-    // Превью — это iframe с НАСТОЯЩИМ /widget?...&preview=true (Chat.svelte
+    // Превью — это iframe с настоящим /widget?...&preview=true (Chat.svelte
     // в этом режиме сам подставляет демо-сообщения без единого сетевого
     // запроса к Twitch), отмасштабированный так, будто окно превью — кусок
     // реального холста OBS. Ширину этого "холста" можно подстроить под свой
-    // реальный Browser Source — раньше она была жёстко зашита в 1920px, и
-    // если у кого-то реальный Browser Source не 1920px шириной (или окно
-    // браузера, в котором открывали ссылку напрямую, было другой ширины),
-    // пропорции в превью и "в реальности" не совпадали.
+    // реальный Browser Source.
     let previewRefWidth = 800;
     const PREVIEW_REF_HEIGHT = 420;
 
