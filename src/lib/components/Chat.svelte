@@ -7,6 +7,7 @@
         fetchFFZBadges,
         fetchFFZPersonalBadges,
         fetchBTTVChannelBots,
+        fetchHomiesBadge,
         preloadSevenTVPaintCatalog,
         resolveTwitchUser
     } from '$lib/services/twitch-api';
@@ -33,7 +34,13 @@
     // Независимые тумблеры отображения — сеть/расчёт всё равно идут (кроме
     // случая personalCosmeticsEnabled=false выше), эти флаги решают только,
     // показывать ли уже готовый результат.
-    const showBadges = urlParams.get('showBadges') !== 'false';
+    // Раньше был один общий showBadges на все источники разом. Теперь у
+    // каждого источника бейджей — свой независимый тумблер (например,
+    // можно выключить только бейджи FFZ, оставив Twitch/7TV/Homies).
+    const showBadgesTwitch = urlParams.get('showBadgesTwitch') !== 'false';
+    const showBadgesFFZ = urlParams.get('showBadgesFFZ') !== 'false';
+    const showBadgesSevenTV = urlParams.get('showBadgesSevenTV') !== 'false';
+    const showBadgesHomies = urlParams.get('showBadgesHomies') !== 'false';
     const showStvColors = urlParams.get('showStvColors') !== 'false';
     const showHighlighted = urlParams.get('showHighlighted') !== 'false';
     const showFirstTimeChatter = urlParams.get('showFirstTimeChatter') !== 'false';
@@ -62,13 +69,13 @@
     const previewMode = urlParams.get('preview') === 'true';
 
     let chatConfig = {
-        fontSize: urlParams.get('fontSize') || '28px',
-        emoteSize: urlParams.get('emoteSize') || '2em',
-        badgeSize: urlParams.get('badgeSize') || '2em',
-        fontWeight: urlParams.get('fontWeight') || '600',
+        fontSize: urlParams.get('fontSize') || '32px',
+        emoteMaxHeight: urlParams.get('emoteMaxHeight') || '42px',
+        badgeSize: urlParams.get('badgeSize') || '1em',
+        fontWeight: urlParams.get('fontWeight') || '800',
         outlineColor: '#000000',
         outlineSize: urlParams.get('outlineSize') || '4px',
-        spacing: urlParams.get('spacing') || '8px',
+        spacing: urlParams.get('spacing') || '10px',
         fontFamily: urlParams.get('font') || 'sans-serif'
     };
 
@@ -90,7 +97,18 @@
 
     let messages: UIMessage[] = [];
     let isLoadingData = true; // пока грузятся бейджи/эмоуты канала
-    $: showLoadingStatus = !previewMode && (isLoadingData || !ircConnected);
+    // !refresh (эмоуты/бейджи) и !reload (весь чат) — отдельные статусы,
+    // показываются той же плашкой, что и статус первичной загрузки.
+    let isRefreshingEmotes = false;
+    let isReloadingChat = false;
+    $: showLoadingStatus = !previewMode && (isLoadingData || !ircConnected || isRefreshingEmotes || isReloadingChat);
+    $: statusText = !ircConnected
+        ? 'Подключение к чату…'
+        : isReloadingChat
+            ? 'Перезагрузка чата…'
+            : isRefreshingEmotes
+                ? 'Обновление эмоутов и бейджей…'
+                : 'Загрузка бейджей и эмоутов…';
     let emoteMap = new Map<string, { url: string; zeroWidth: boolean }>();
     let channelEmoteMap = new Map<string, string>();
     let badgeDictionary: Record<string, string> = {};
@@ -273,6 +291,7 @@
      * канала (боты и т.п.), плюс кастомный мод/VIP-бейдж канала.
      */
     function collectFFZChannelBadges(msg: ChatMessage): string[] {
+        if (!showBadgesFFZ) return [];
         const urls: string[] = [];
         if (msg.isMod && ffzModBadge) urls.push(ffzModBadge);
         if (msg.isVip && ffzVipBadge) urls.push(ffzVipBadge);
@@ -302,7 +321,10 @@
             user: msg.displayName,
             color,
             fragments: parseMessage(msg.text, msg.emotes),
-            badgeUrls: [...msg.badges.map((b) => badgeUrlFor(b.name, b.version)), ...collectFFZChannelBadges(msg)],
+            badgeUrls: [
+                ...(showBadgesTwitch ? msg.badges.map((b) => badgeUrlFor(b.name, b.version)) : []),
+                ...collectFFZChannelBadges(msg)
+            ],
             isHighlighted: msg.isHighlighted,
             isFirstMessage: msg.isFirstMessage
         };
@@ -332,9 +354,10 @@
         try {
             const resolvedId = userId || (await resolveTwitchUser(username))?.id;
 
-            const [stvCosmetics, ffzPersonal] = await Promise.all([
+            const [stvCosmetics, ffzPersonal, homiesBadge] = await Promise.all([
                 resolvedId ? fetch7TVUserCosmetics(resolvedId) : Promise.resolve(null),
-                fetchFFZPersonalBadges(username).catch(() => ({ urls: [], isBot: false }))
+                fetchFFZPersonalBadges(username).catch(() => ({ urls: [], isBot: false })),
+                (resolvedId && showBadgesHomies) ? fetchHomiesBadge(resolvedId).catch(() => undefined) : Promise.resolve(undefined)
             ]);
 
             // Личный (не канальный) FFZ-бейдж bot узнаётся только сейчас,
@@ -347,7 +370,7 @@
                 return;
             }
 
-            if (!stvCosmetics && ffzPersonal.urls.length === 0) return;
+            if (!stvCosmetics && ffzPersonal.urls.length === 0 && !homiesBadge) return;
 
             const finalColor = showStvColors ? stvCosmetics?.paintColor : undefined;
             if (finalColor) userColorMap.set(username, finalColor);
@@ -361,8 +384,9 @@
                     paintDropShadow: showStvColors ? stvCosmetics?.paintDropShadow : undefined,
                     badgeUrls: [
                         ...m.badgeUrls,
-                        ...(stvCosmetics?.badgeUrl ? [stvCosmetics.badgeUrl] : []),
-                        ...ffzPersonal.urls
+                        ...(showBadgesSevenTV && stvCosmetics?.badgeUrl ? [stvCosmetics.badgeUrl] : []),
+                        ...(showBadgesFFZ ? ffzPersonal.urls : []),
+                        ...(showBadgesHomies && homiesBadge ? [homiesBadge] : [])
                     ]
                 };
             });
@@ -453,6 +477,8 @@
         feed();
     }
 
+    let resolvedChannelUser: { id: string; login: string } | null = null;
+
     onMount(async () => {
         if (previewMode) {
             isLoadingData = false;
@@ -467,6 +493,7 @@
         try {
             const user = await resolveTwitchUser(channel);
             if (!user) return;
+            resolvedChannelUser = user;
             await Promise.all([
                 loadBadges(user.id),
                 loadChannelExtras(user.id, user.login)
@@ -480,12 +507,50 @@
             isLoadingData = false;
         }
     });
+
+    /**
+     * !refresh — перезагружает только бейджи/эмоуты канала (FFZ/7TV/BTTV/
+     * Homies-словарь), не трогая уже показанные сообщения и не разрывая
+     * IRC-соединение. Пригодится, если стример что-то поменял в панели
+     * FFZ/BTTV/7TV прямо во время стрима.
+     */
+    export async function refreshEmotes() {
+        if (!resolvedChannelUser || previewMode) return;
+        isRefreshingEmotes = true;
+        try {
+            await Promise.all([
+                loadBadges(resolvedChannelUser.id),
+                loadChannelExtras(resolvedChannelUser.id, resolvedChannelUser.login)
+            ]);
+        } finally {
+            isRefreshingEmotes = false;
+        }
+    }
+
+    /**
+     * !reload — то же самое, что !refresh, плюс полностью очищает историю
+     * сообщений оверлея (переподключение самого IRC-сокета делает
+     * widget/+page.svelte, т.к. сам сокет живёт там, а не в Chat.svelte).
+     */
+    export async function reloadChat() {
+        if (!resolvedChannelUser || previewMode) return;
+        isReloadingChat = true;
+        messages = [];
+        try {
+            await Promise.all([
+                loadBadges(resolvedChannelUser.id),
+                loadChannelExtras(resolvedChannelUser.id, resolvedChannelUser.login)
+            ]);
+        } finally {
+            isReloadingChat = false;
+        }
+    }
 </script>
 
 <div class="chat-wrapper"
      style="
       --chat-fs: {chatConfig.fontSize};
-      --chat-es: {chatConfig.emoteSize};
+      --chat-es: {chatConfig.emoteMaxHeight};
       --chat-fw: {chatConfig.fontWeight};
       --chat-oc: {chatConfig.outlineColor};
       --chat-os: {chatConfig.outlineSize};
@@ -493,9 +558,7 @@
       --chat-font: '{chatConfig.fontFamily}';
      ">
     {#if showLoadingStatus}
-        <div class="chat-status">
-            {#if !ircConnected}Подключение к чату…{:else}Загрузка бейджей и эмоутов…{/if}
-        </div>
+        <div class="chat-status">{statusText}</div>
     {/if}
     <div class="chat-container">
         {#each messages as m (m.id)}
@@ -503,7 +566,7 @@
                  class:highlighted={showHighlighted && m.isHighlighted}
                  class:first-time={showFirstTimeChatter && m.isFirstMessage && !(showHighlighted && m.isHighlighted)}
             >
-                {#if showBadges}
+                {#if m.badgeUrls.length > 0}
                     <span class="badges">
                         {#each m.badgeUrls as url}
                             <img src={url} class="badge" on:error={handleImageError} alt="" />
@@ -556,7 +619,7 @@
     .message-row {
         margin-bottom: var(--chat-sp);
         animation: slideIn 0.3s ease-out forwards;
-        line-height: 1.2;
+        line-height: 1.5em;
         display: block;
         word-wrap: break-word;
         overflow-wrap: break-word;
@@ -571,7 +634,7 @@
 
     .message-row.first-time {
         background: rgba(78, 30, 80, 0.45);
-        border-left: 4px solid #ff75e6;
+        border-left: 4px solid #4e1e50;
     }
 
     .chat-status {
@@ -646,7 +709,8 @@
     }
 
     .emote {
-        height: var(--chat-es) !important;
+        max-height: var(--chat-es) !important;
+        height: auto !important;
         width: auto !important;
         vertical-align: middle;
         margin: 0 2px;

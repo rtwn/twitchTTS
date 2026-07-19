@@ -430,3 +430,30 @@ export async function fetchFFZPersonalBadges(login: string): Promise<{ urls: str
         return empty;
     }
 }
+
+/**
+ * Верифицированные бейджи ChatterinoHomies (chatterinohomies.com) — ещё
+ * один независимый источник плюшек, как 7TV/FFZ. API отдаёт только
+ * `fileId` на конкретного зрителя (/api/v2/badges/{twitchId}), сама
+ * картинка достаётся по тому же CDN-паттерну, что виден в примере
+ * bulk-списка (`cdn.chatterinohomies.com/badges/{id}/{size}.webp`) —
+ * 36.webp соответствует размеру "image2" из документации.
+ */
+const homiesBadgeCache = new Map<string, string | undefined>();
+
+export async function fetchHomiesBadge(twitchId: string): Promise<string | undefined> {
+    if (homiesBadgeCache.has(twitchId)) return homiesBadgeCache.get(twitchId);
+    try {
+        const res = await fetch(`https://chatterinohomies.com/api/v2/badges/${twitchId}`);
+        if (!res.ok) { homiesBadgeCache.set(twitchId, undefined); return undefined; }
+        const data = await res.json();
+        const entry = data?.data?.[0];
+        const url = entry?.fileId ? `https://cdn.chatterinohomies.com/badges/${entry.fileId}/36.webp` : undefined;
+        homiesBadgeCache.set(twitchId, url);
+        return url;
+    } catch (e) {
+        console.error('[Homies] Ошибка загрузки бейджа:', e);
+        homiesBadgeCache.set(twitchId, undefined);
+        return undefined;
+    }
+}

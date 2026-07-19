@@ -43,12 +43,29 @@
         irc.onMessage((msg) => {
             if (chatEnabled && chatRef) chatRef.addMessage(msg);
 
-            if (ttsEnabled && playerRef) {
-                const parsed = parseCommand(msg);
-                if (parsed) {
-                    const flags = { broadcaster: msg.isBroadcaster, mod: msg.isMod, vip: msg.isVip };
-                    playerRef.handleCommand(msg.username, parsed.command, parsed.rest, flags);
+            const parsed = parseCommand(msg);
+            if (!parsed) return;
+            const isPrivileged = msg.isBroadcaster || msg.isMod;
+
+            // !refresh / !reload — административные команды оверлея, доступны
+            // только модераторам/стримеру, чтобы рядовые зрители не могли
+            // их спамить. Реализованы тут, а не в Player.svelte, т.к. они не
+            // про TTS, а про сам чат-оверлей и IRC-соединение.
+            if (isPrivileged && chatEnabled && chatRef) {
+                if (parsed.command === 'refresh') { chatRef.refreshEmotes(); return; }
+                if (parsed.command === 'reload') {
+                    chatRef.reloadChat();
+                    // Полная перезагрузка включает и сам сокет чата — не
+                    // только данные канала (бейджи/эмоуты), которые перегружает reloadChat().
+                    irc?.disconnect();
+                    irc?.connect(channel);
+                    return;
                 }
+            }
+
+            if (ttsEnabled && playerRef) {
+                const flags = { broadcaster: msg.isBroadcaster, mod: msg.isMod, vip: msg.isVip };
+                playerRef.handleCommand(msg.username, parsed.command, parsed.rest, flags);
             }
         });
 

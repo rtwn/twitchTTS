@@ -15,10 +15,13 @@
         { name: 'Comfortaa', family: '"Comfortaa", cursive' }
     ];
 
+    // Пресеты размеров вместо голых слайдеров — конкретные подписанные
+    // варианты, число видно прямо на кнопке, а честно работающее превью
+    // сразу показывает результат.
     const FONT_SIZE_PRESETS = [
-        { label: 'Small', value: 22 },
-        { label: 'Medium', value: 28 },
-        { label: 'Large', value: 36 }
+        { label: 'Small', value: 20 },
+        { label: 'Medium', value: 32 },
+        { label: 'Large', value: 48 }
     ];
     const SHADOW_PRESETS = [
         { label: 'Off', value: 0 },
@@ -26,11 +29,29 @@
         { label: 'Medium', value: 4 },
         { label: 'Large', value: 8 }
     ];
-    const EMOTE_SIZE_PRESETS = [
-        { label: '1x', value: 2 },
-        { label: '2x', value: 4 },
-        { label: '3x', value: 6 }
+    // max-height смайлов в 1x при каждом размере текста — числа заданы
+    // явно (а не в em), т.к. em смайла всё равно резолвился не от размера
+    // текста, а от базового шрифта браузера (16px), это была скрытая
+    // причина, почему итоговый масштаб смайлов ощущался непредсказуемым.
+    const EMOTE_BASE_HEIGHT: Record<number, number> = { 20: 28, 32: 42, 48: 60 };
+    const EMOTE_MULTIPLIER_PRESETS = [
+        { label: '1x', value: 1 },
+        { label: '2x', value: 2 },
+        { label: '3x', value: 3 }
     ];
+    // 800 — новый дефолт (жирный, но не "самый жирный"), 900 — на ступень
+    // толще, 400/600 — две ступени тоньше.
+    const FONT_WEIGHT_PRESETS = [
+        { label: 'Regular', value: '400' },
+        { label: 'Semi-Bold', value: '600' },
+        { label: 'Bold', value: '800' },
+        { label: 'Thick', value: '900' }
+    ];
+
+    function emoteMaxHeightPx(config: any): number {
+        const base = EMOTE_BASE_HEIGHT[config.fontSize] ?? 42;
+        return Math.round(base * config.emoteMultiplier);
+    }
 
     function generateTTSLink(origin: string, config: any) {
         const url = new URL(`${origin}/widget`);
@@ -40,14 +61,17 @@
 
         if (config.chat) {
             url.searchParams.set('fontSize', config.fontSize + 'px');
-            url.searchParams.set('emoteSize', config.emoteSize + 'em');
+            url.searchParams.set('emoteMaxHeight', emoteMaxHeightPx(config) + 'px');
             url.searchParams.set('outlineSize', config.outlineSize + 'px');
             url.searchParams.set('spacing', config.spacing + 'px');
             url.searchParams.set('fontWeight', config.fontWeight);
             url.searchParams.set('font', config.fontFamily);
             url.searchParams.set('outlineColor', '#000000');
 
-            url.searchParams.set('showBadges', config.showBadges.toString());
+            url.searchParams.set('showBadgesTwitch', config.showBadgesTwitch.toString());
+            url.searchParams.set('showBadgesFFZ', config.showBadgesFFZ.toString());
+            url.searchParams.set('showBadgesSevenTV', config.showBadgesSevenTV.toString());
+            url.searchParams.set('showBadgesHomies', config.showBadgesHomies.toString());
             url.searchParams.set('showStvColors', config.showStvColors.toString());
             url.searchParams.set('showHighlighted', config.showHighlighted.toString());
             url.searchParams.set('showFirstTimeChatter', config.showFirstTimeChatter.toString());
@@ -92,13 +116,16 @@
         ytMaxLen: 30,
         chat: true,
         tts: true,
-        fontSize: 28,
-        emoteSize: 2,
+        fontSize: 32,
+        emoteMultiplier: 1,
         outlineSize: 4,
-        spacing: 8,
-        fontWeight: "600", //ltr
+        spacing: 10,
+        fontWeight: "800",
         fontFamily: "Roboto",
-        showBadges: true,
+        showBadgesTwitch: true,
+        showBadgesFFZ: true,
+        showBadgesSevenTV: true,
+        showBadgesHomies: true,
         showStvColors: true,
         showHighlighted: true,
         showFirstTimeChatter: true,
@@ -165,12 +192,12 @@
     }
 
     // ---- Live Preview ----
-    // Превью — это iframe с настоящим /widget?...&preview=true (Chat.svelte
+    // Превью — это iframe с НАСТОЯЩИМ /widget?...&preview=true (Chat.svelte
     // в этом режиме сам подставляет демо-сообщения без единого сетевого
     // запроса к Twitch), отмасштабированный так, будто окно превью — кусок
     // реального холста OBS. Ширину этого "холста" можно подстроить под свой
     // реальный Browser Source.
-    let previewRefWidth = 800;
+    let previewRefWidth = 1920;
     const PREVIEW_REF_HEIGHT = 420;
 
     let previewContainerWidth = 0;
@@ -196,7 +223,7 @@
 </script>
 
 <svelte:head>
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;600;800&family=Lato:wght@400;700;900&family=Noto+Sans:wght@400;600;800&family=Baloo+Tammudu+2:wght@400;600;800&family=Source+Code+Pro:wght@400;600;800&family=Comfortaa:wght@400;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;600;800;900&family=Lato:wght@400;700;900&family=Noto+Sans:wght@400;600;800;900&family=Baloo+Tammudu+2:wght@400;600;800&family=Source+Code+Pro:wght@400;600;800;900&family=Comfortaa:wght@400;600;700&display=swap" rel="stylesheet">
 </svelte:head>
 
 <main>
@@ -263,10 +290,18 @@
                 </div>
             </div>
             <div class="control">
-                <label>Emote Size</label>
+                <label>Text Weight</label>
                 <div class="segmented">
-                    {#each EMOTE_SIZE_PRESETS as p}
-                        <button type="button" class:selected={config.emoteSize === p.value} on:click={() => config.emoteSize = p.value}>{p.label}</button>
+                    {#each FONT_WEIGHT_PRESETS as p}
+                        <button type="button" class:selected={config.fontWeight === p.value} on:click={() => config.fontWeight = p.value}>{p.label}</button>
+                    {/each}
+                </div>
+            </div>
+            <div class="control">
+                <label>Emote Size ({emoteMaxHeightPx(config)}px max-height)</label>
+                <div class="segmented">
+                    {#each EMOTE_MULTIPLIER_PRESETS as p}
+                        <button type="button" class:selected={config.emoteMultiplier === p.value} on:click={() => config.emoteMultiplier = p.value}>{p.label}</button>
                     {/each}
                 </div>
             </div>
@@ -277,18 +312,12 @@
 
             <FontSelect bind:selected={config.fontFamily} {fonts} />
 
-            <div class="control">
-                <label>Font Weight</label>
-                <select bind:value={config.fontWeight}>
-                    <option value="400">Regular</option>
-                    <option value="600">Semi-Bold</option>
-                    <option value="800">Extra-Bold</option>
-                </select>
-            </div>
-
             <hr />
             <div class="form-group checkbox-container">
-                <div class="switch-row"><span>Show badges</span><label class="switch"><input type="checkbox" bind:checked={config.showBadges} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Show Twitch badges</span><label class="switch"><input type="checkbox" bind:checked={config.showBadgesTwitch} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Show FFZ badges</span><label class="switch"><input type="checkbox" bind:checked={config.showBadgesFFZ} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Show 7TV badges</span><label class="switch"><input type="checkbox" bind:checked={config.showBadgesSevenTV} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Show Homies badges</span><label class="switch"><input type="checkbox" bind:checked={config.showBadgesHomies} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Show 7TV colors/paints</span><label class="switch"><input type="checkbox" bind:checked={config.showStvColors} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Highlight "Highlighted Messages"</span><label class="switch"><input type="checkbox" bind:checked={config.showHighlighted} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Highlight first-time chatters</span><label class="switch"><input type="checkbox" bind:checked={config.showFirstTimeChatter} /><span class="slider"></span></label></div>
@@ -301,6 +330,7 @@
                     </div>
                 {/if}
             </div>
+            <p class="hint">Broadcaster/mods can type <code>!refresh</code> in chat to reload emotes/badges, or <code>!reload</code> to reload the whole overlay.</p>
         </div>
     {/if}
 
@@ -389,6 +419,9 @@
         font-weight: 600;
     }
 
+    .hint { font-size: 0.8rem; color: #6b7280; margin-top: 4px; }
+    .hint code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; color: #7c3aed; }
+
     /* PREVIEW */
     .preview-box { background: #3a3a3a; border-radius: 10px; padding: 16px; margin: 20px 0 10px; border: 2px solid #7c3aed; }
     .preview-label-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; gap: 12px; flex-wrap: wrap; }
@@ -407,16 +440,7 @@
      * будто это полноразмерный холст OBS), затем весь iframe целиком
      * масштабируется вниз transform:scale, чтобы влезть в панель настроек.
      * Так пропорции шрифта/эмоутов относительно ширины оверлея всегда
-     * совпадают с тем, что реально увидят зрители в OBS — раньше превью
-     * сравнивало px шрифта с шириной панели настроек, из-за чего размеры
-     * выглядели не так, как в реально открытой /widget вкладке.
-     *
-     * previewContainerWidth раньше измерялся на самом .preview-box, у
-     * которого есть padding — то есть реальная доступная ширина для iframe
-     * была на 2×padding меньше измеренного значения, и scale получался
-     * чуть завышенным. Теперь clientWidth меряется на .preview-frame-outer —
-     * прямом потомке без собственного padding, это и есть настоящая
-     * доступная ширина.
+     * совпадают с тем, что реально увидят зрители в OBS.
      */
     .preview-frame-outer {
         width: 100%;
