@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, onDestroy, afterUpdate } from 'svelte';
     import {
         fetch7TVEmotesByTwitchId,
         fetch7TVUserCosmetics,
@@ -9,7 +9,8 @@
         fetchBTTVChannelBots,
         fetchHomiesBadge,
         preloadSevenTVPaintCatalog,
-        resolveTwitchUser
+        resolveTwitchUser,
+        clearPersonalCosmeticsCache
     } from '$lib/services/twitch-api';
     import type { ChatMessage } from '$lib/services/twitch-irc';
     import { page } from '$app/state';
@@ -87,15 +88,29 @@
         username: string; // login, нужен для докладки бейджей после resolve
         user: string;
         color: string;
+        // Настоящий твичевский (или дефолтный по хэшу ника) цвет — используется
+        // для двоеточия после ника и для подсветки упоминаний этого человека
+        // в чужих сообщениях. Не путать с `color` — тот может быть переопределён
+        // 7TV-пейнтом specifично для отображения САМОГО ника.
+        twitchColor: string;
         paintBackgroundImage?: string;
         paintDropShadow?: string;
         fragments: Fragment[];
-        badgeUrls: string[];
+        // Разделены специально: channelBadgeUrls ставится один раз в
+        // addMessage и больше не меняется, а personalBadgeUrls полностью
+        // ПЕРЕЗАПИСЫВАЕТСЯ при каждом вызове enrichWithPersonalCosmetics —
+        // это и делает !refresh безопасным для повторного вызова: если бы
+        // они лежали в одном массиве и просто дописывались, повторный
+        // прогон (после !refresh) задваивал бы уже показанные бейджи.
+        channelBadgeUrls: string[];
+        personalBadgeUrls: string[];
         isHighlighted: boolean;
         isFirstMessage: boolean;
+        skipAnimation: boolean;
     };
 
     let messages: UIMessage[] = [];
+    let chatContainerEl: HTMLDivElement;
     let isLoadingData = true; // пока грузятся бейджи/эмоуты канала
     // !refresh (эмоуты/бейджи) и !reload (весь чат) — отдельные статусы,
     // показываются той же плашкой, что и статус первичной загрузки.
@@ -120,6 +135,18 @@
     // для подсветки упоминаний (@ник и просто ник) их собственным цветом.
     // Обновляется по мере поступления сообщений — упоминания людей, которые
     // ещё не написали ни разу в этой сессии, подсветить нечем, это ожидаемо.
+    //
+    // ВАЖНО: тут всегда лежит именно твичевский (или дефолтный по хэшу ника)
+    // цвет, никогда 7TV. Раньше сюда же дописывался 7TV-цвет упомянутого
+    // человека — но 7TV-пейнт часто вообще не сплошной цвет, а градиент,
+    // и тогда 7TV-цвета попросту нет, а карта продолжала хранить старое
+    // значение (синтетический дефолтный цвет по хэшу ника, если у человека
+    // не задан твичевский цвет) — снаружи это выглядело как "какой-то
+    // третий, ни твичевский, ни 7tv цвет" у упоминания. Раз 7TV-пейнт всё
+    // равно нельзя корректно передать одним сплошным цветом упоминания,
+    // проще и предсказуемее всегда использовать твичевский/дефолтный цвет
+    // и для двоеточия, и для упоминаний — тогда они всегда совпадают друг
+    // с другом и с тем, что было бы у ника без всякого 7TV.
     let userColorMap = new Map<string, string>();
 
     // Стандартная палитра Twitch для зрителей, которые никогда не выбирали
@@ -300,6 +327,24 @@
         return urls;
     }
 
+    /**
+     * При очень активном чате анимация появления каждой отдельной строки
+     * (transform+opacity на каждое сообщение) — это лишняя работа для
+     * браузера/GPU ровно тогда, когда сообщений и так больше всего.
+     * Простой счётчик "сколько сообщений за последнюю секунду" — если
+     * порог превышен, новые сообщения появляются без анимации, пока поток
+     * не успокоится.
+     */
+    let recentMessageTimestamps: number[] = [];
+    const HIGH_FREQUENCY_THRESHOLD = 8; // сообщений в секунду
+
+    function isChatCurrentlyBusy(): boolean {
+        const now = Date.now();
+        recentMessageTimestamps.push(now);
+        recentMessageTimestamps = recentMessageTimestamps.filter((t) => now - t < 1000);
+        return recentMessageTimestamps.length > HIGH_FREQUENCY_THRESHOLD;
+    }
+
     export function addMessage(msg: ChatMessage) {
         if (messages.some((m) => m.id === msg.id)) return;
         // Официальный Twitch "Chat Bot" badge (появился в 2025, set_id
@@ -312,24 +357,32 @@
         if (hideBots && (isNativeBot || channelBots.has(msg.username))) return;
         if (hideCommands && commandPrefixes.some((p) => msg.text.startsWith(p))) return;
 
-        const color = msg.color || defaultColorForUser(msg.username);
-        userColorMap.set(msg.username, color);
+        const twitchColor = msg.color || defaultColorForUser(msg.username);
+        userColorMap.set(msg.username, twitchColor);
 
         const uiMsg: UIMessage = {
             id: msg.id,
             username: msg.username,
             user: msg.displayName,
-            color,
+            color: twitchColor,
+            twitchColor,
             fragments: parseMessage(msg.text, msg.emotes),
-            badgeUrls: [
+            channelBadgeUrls: [
                 ...(showBadgesTwitch ? msg.badges.map((b) => badgeUrlFor(b.name, b.version)) : []),
                 ...collectFFZChannelBadges(msg)
             ],
+            personalBadgeUrls: [],
             isHighlighted: msg.isHighlighted,
-            isFirstMessage: msg.isFirstMessage
+            isFirstMessage: msg.isFirstMessage,
+            skipAnimation: isChatCurrentlyBusy()
         };
 
-        messages = [...messages, uiMsg].slice(-30);
+        // Жёсткий потолок — просто страховка на патологический случай (очень
+        // высокий канвас + мелкий шрифт + очень частый чат). В обычной
+        // работе старые сообщения убирает pruneOffscreenMessages() ниже —
+        // по факту ухода за пределы видимой области, а не по фиксированному
+        // числу.
+        messages = [...messages, uiMsg].slice(-150);
 
         if (messageLifetimeMs > 0) {
             setTimeout(() => { messages = messages.filter((m) => m.id !== uiMsg.id); }, messageLifetimeMs);
@@ -370,24 +423,30 @@
                 return;
             }
 
-            if (!stvCosmetics && ffzPersonal.urls.length === 0 && !homiesBadge) return;
-
             const finalColor = showStvColors ? stvCosmetics?.paintColor : undefined;
-            if (finalColor) userColorMap.set(username, finalColor);
+            const personalBadgeUrls = [
+                ...(showBadgesSevenTV && stvCosmetics?.badgeUrl ? [stvCosmetics.badgeUrl] : []),
+                ...(showBadgesFFZ ? ffzPersonal.urls : []),
+                ...(showBadgesHomies && homiesBadge ? [homiesBadge] : [])
+            ];
 
+            // Раньше тут был ранний return, если у зрителя не нашлось вообще
+            // ничего персонального — но эта функция теперь может вызываться
+            // ПОВТОРНО для уже отрисованного сообщения (см. !refresh), а
+            // значит должна уметь и СНЯТЬ то, что было раньше, если зритель,
+            // скажем, убрал себе цвет/бейдж на 7TV. Раньше здесь ещё был
+            // `finalColor || m.color` — это тоже задваивало старое значение
+            // навечно, если после обновления цвета не стало: используем
+            // честный twitchColor как базу, а не то, что могло остаться от
+            // предыдущего прогона.
             messages = messages.map((m) => {
                 if (m.id !== msgId) return m;
                 return {
                     ...m,
-                    color: finalColor || m.color,
+                    color: finalColor || m.twitchColor,
                     paintBackgroundImage: showStvColors ? stvCosmetics?.paintBackgroundImage : undefined,
                     paintDropShadow: showStvColors ? stvCosmetics?.paintDropShadow : undefined,
-                    badgeUrls: [
-                        ...m.badgeUrls,
-                        ...(showBadgesSevenTV && stvCosmetics?.badgeUrl ? [stvCosmetics.badgeUrl] : []),
-                        ...(showBadgesFFZ ? ffzPersonal.urls : []),
-                        ...(showBadgesHomies && homiesBadge ? [homiesBadge] : [])
-                    ]
+                    personalBadgeUrls
                 };
             });
         } catch { /* косметика необязательна, тихо игнорируем */ }
@@ -400,6 +459,68 @@
     export function clearAllMessages() {
         messages = [];
     }
+
+    /**
+     * Оверлей растёт снизу вверх (.chat-wrapper прибит к bottom), новый
+     * контейнер не имеет фиксированной высоты — со временем старые
+     * сообщения уходят выше верхней границы окна/канваса OBS и становятся
+     * невидимыми, но их DOM-узлы (с картинками эмоутов/бейджей) никуда не
+     * деваются и продолжают висеть в памяти и участвовать в layout/paint.
+     * При долгой сессии в активном чате это накапливается.
+     *
+     * Раз в кадр проверяем самые старые строки по порядку сверху вниз —
+     * как только находим первую, чей нижний край всё ещё виден (bottom > 0),
+     * дальше можно не проверять: сообщения идут по порядку сверху вниз,
+     * значит всё, что дальше, тем более видно.
+     *
+     * Важный момент про OBS: Browser Source рендерится в размере, который
+     * задан в его НАСТРОЙКАХ (ширина/высота источника), а не в размере,
+     * который получается после обрезки (crop) самого элемента источника на
+     * сцене — обрезка происходит уже ПОСЛЕ рендера, как отдельная операция
+     * компоновки сцены, и странице/JS о ней ничего не известно. Обрезка
+     * может только показать МЕНЬШЕ, чем есть в самом рендере, но никогда
+     * больше — то есть если сообщение невидимо в полном рендере (за
+     * пределами window.innerHeight), оно гарантированно невидимо и после
+     * любой обрезки в OBS. Поэтому эта проверка безопасна независимо от
+     * того, как именно стример обрезал источник в сцене.
+     */
+    let pruneScheduled = false;
+
+    function pruneOffscreenMessages() {
+        if (!chatContainerEl || messages.length < 10) return;
+        const rows = chatContainerEl.querySelectorAll<HTMLElement>('.message-row');
+        let cutCount = 0;
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i].getBoundingClientRect().bottom <= 0) cutCount = i + 1;
+            else break;
+        }
+        if (cutCount > 0) messages = messages.slice(cutCount);
+    }
+
+    afterUpdate(() => {
+        if (previewMode || pruneScheduled) return;
+        pruneScheduled = true;
+        requestAnimationFrame(() => {
+            pruneScheduled = false;
+            pruneOffscreenMessages();
+        });
+    });
+
+    // Если стример прямо во время стрима поменяет размер Browser Source в
+    // OBS, актуализировать список "что уже за пределами экрана" стоит сразу,
+    // а не дожидаться следующего сообщения в чате (следующего afterUpdate).
+    function handleWindowResize() {
+        if (pruneScheduled) return;
+        pruneScheduled = true;
+        requestAnimationFrame(() => {
+            pruneScheduled = false;
+            pruneOffscreenMessages();
+        });
+    }
+
+    onDestroy(() => {
+        if (typeof window !== 'undefined') window.removeEventListener('resize', handleWindowResize);
+    });
 
     /** Несколько демо-сообщений для превью настроек — см. `previewMode` выше. */
     function loadPreviewMessages() {
@@ -486,6 +607,8 @@
             return;
         }
 
+        window.addEventListener('resize', handleWindowResize);
+
         // Не блокирует остальной onMount и рендер — просто прогревает кэш
         // пейнтов к моменту, когда придёт первое сообщение с градиентом.
         preloadSevenTVPaintCatalog();
@@ -509,19 +632,32 @@
     });
 
     /**
-     * !refresh — перезагружает только бейджи/эмоуты канала (FFZ/7TV/BTTV/
-     * Homies-словарь), не трогая уже показанные сообщения и не разрывая
-     * IRC-соединение. Пригодится, если стример что-то поменял в панели
-     * FFZ/BTTV/7TV прямо во время стрима.
+     * !refresh — перезагружает бейджи/эмоуты канала (FFZ/7TV/BTTV/Homies-
+     * словарь) И персональные плюшки зрителей (7TV-цвет/бейдж, личный FFZ-
+     * бейдж, Homies-бейдж) уже показанных сообщений — не трогая саму
+     * историю сообщений и не разрывая IRC-соединение.
+     *
+     * Раньше сбрасывались только канальные данные — персональные кэши
+     * конкретных зрителей (модуль twitch-api.ts) продолжали жить до
+     * перезагрузки страницы, поэтому если зритель обновил себе бейдж/цвет
+     * на 7TV прямо во время стрима, !refresh это никак не подхватывал и
+     * помогал только F5.
      */
     export async function refreshEmotes() {
         if (!resolvedChannelUser || previewMode) return;
         isRefreshingEmotes = true;
         try {
+            clearPersonalCosmeticsCache();
             await Promise.all([
                 loadBadges(resolvedChannelUser.id),
                 loadChannelExtras(resolvedChannelUser.id, resolvedChannelUser.login)
             ]);
+            if (personalCosmeticsEnabled) {
+                // Снимок ID сообщений на момент вызова — если за время
+                // запросов список успел обновиться, лишнее просто отфильтруется
+                // проверкой m.id !== msgId внутри enrichWithPersonalCosmetics.
+                messages.forEach((m) => void enrichWithPersonalCosmetics(m.username, '', m.id));
+            }
         } finally {
             isRefreshingEmotes = false;
         }
@@ -531,12 +667,16 @@
      * !reload — то же самое, что !refresh, плюс полностью очищает историю
      * сообщений оверлея (переподключение самого IRC-сокета делает
      * widget/+page.svelte, т.к. сам сокет живёт там, а не в Chat.svelte).
+     * Персональные кэши тоже сбрасываются — будущие сообщения после
+     * перезагрузки получат свежие 7TV/FFZ/Homies-плюшки, а не то, что
+     * было закэшировано до вызова.
      */
     export async function reloadChat() {
         if (!resolvedChannelUser || previewMode) return;
         isReloadingChat = true;
         messages = [];
         try {
+            clearPersonalCosmeticsCache();
             await Promise.all([
                 loadBadges(resolvedChannelUser.id),
                 loadChannelExtras(resolvedChannelUser.id, resolvedChannelUser.login)
@@ -560,16 +700,17 @@
     {#if showLoadingStatus}
         <div class="chat-status">{statusText}</div>
     {/if}
-    <div class="chat-container">
+    <div class="chat-container" bind:this={chatContainerEl}>
         {#each messages as m (m.id)}
             <div class="message-row"
                  class:highlighted={showHighlighted && m.isHighlighted}
                  class:first-time={showFirstTimeChatter && m.isFirstMessage && !(showHighlighted && m.isHighlighted)}
+                 class:no-anim={m.skipAnimation}
             >
-                {#if m.badgeUrls.length > 0}
+                {#if m.channelBadgeUrls.length > 0 || m.personalBadgeUrls.length > 0}
                     <span class="badges">
-                        {#each m.badgeUrls as url}
-                            <img src={url} class="badge" on:error={handleImageError} alt="" />
+                        {#each [...m.channelBadgeUrls, ...m.personalBadgeUrls] as url}
+                            <img src={url} class="badge" on:error={handleImageError} loading="lazy" alt="" />
                         {/each}
                     </span>
                 {/if}
@@ -582,7 +723,7 @@
                 {:else}
                     <span class="username" style="color: {m.color}">{m.user}</span>
                 {/if}
-                <span class="colon">:</span>
+                <span class="colon" style="color: {m.twitchColor}">:</span>
 
                 {#each m.fragments as f}
                     {#if f.type === 'text'}
@@ -594,11 +735,11 @@
                     {:else if f.urls.length > 1}
                         <span class="emote-stack">
                             {#each f.urls as url}
-                                <img src={url} class="emote" on:error={handleImageError} alt="" />
+                                <img src={url} class="emote" on:error={handleImageError} loading="lazy" alt="" />
                             {/each}
                         </span>
                     {:else}
-                        <img src={f.urls[0]} class="emote" on:error={handleImageError} alt="" />
+                        <img src={f.urls[0]} class="emote" on:error={handleImageError} loading="lazy" alt="" />
                     {/if}
                 {/each}
             </div>
@@ -619,7 +760,7 @@
     .message-row {
         margin-bottom: var(--chat-sp);
         animation: slideIn 0.3s ease-out forwards;
-        line-height: 1.5em;
+        line-height: 1.2;
         display: block;
         word-wrap: break-word;
         overflow-wrap: break-word;
@@ -637,14 +778,28 @@
         border-left: 4px solid #4e1e50;
     }
 
+    /* При активном чате (см. isChatCurrentlyBusy в скрипте) новые сообщения
+       появляются без transform/opacity-анимации — меньше лишней работы для
+       layout/GPU ровно тогда, когда сообщений и так больше всего. */
+    .message-row.no-anim {
+        animation: none;
+    }
+
     .chat-status {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10;
         display: inline-block;
-        color: #ccc;
-        background: rgba(0, 0, 0, 0.5);
-        font-size: 14px;
-        padding: 4px 10px;
-        border-radius: 6px;
-        margin-bottom: 8px;
+        white-space: nowrap;
+        color: #f5f5f5;
+        background: rgba(0, 0, 0, 0.65);
+        font-size: 22px;
+        font-weight: 600;
+        padding: 12px 24px;
+        border-radius: 10px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
     }
 
     .username, .chat-text, .colon {

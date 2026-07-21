@@ -2,6 +2,61 @@
  * Сервис для работы с внешними API (Twitch ID, 7TV, FFZ).
  */
 
+/**
+ * Лёгкая альтернатива SharedWorker для двух по-настоящему больших и редко
+ * меняющихся общих справочников (весь каталог пейнтов 7TV, весь словарь
+ * бейджей FFZ) — они одинаковы для ЛЮБОГО канала и зрителя, так что нет
+ * смысла тянуть их заново на каждой вкладке/OBS-источнике или при каждой
+ * перезагрузке. SharedWorker дал бы похожий эффект для одновременно
+ * открытых вкладок одного и того же origin, но требует отдельного worker-
+ * скрипта и протокола сообщений, а выигрыш ограничен только пока эти
+ * вкладки открыты одновременно. localStorage даёт тот же эффект проще и
+ * надёжнее — переживает и несколько одновременных вкладок, и обычный
+ * перезапуск браузера/OBS между стримами, и одинаково хорошо работает в
+ * любом Chromium, включая CEF внутри OBS.
+ */
+const LOCAL_CACHE_TTL_MS = 60 * 60 * 1000; // 1 час — справочники обновляются редко, но не никогда
+
+function readLocalCache<T>(key: string): T | null {
+    try {
+        if (typeof localStorage === 'undefined') return null;
+        const raw = localStorage.getItem(key);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.ts !== 'number' || Date.now() - parsed.ts > LOCAL_CACHE_TTL_MS) return null;
+        return parsed.data as T;
+    } catch {
+        return null;
+    }
+}
+
+function writeLocalCache<T>(key: string, data: T) {
+    try {
+        if (typeof localStorage === 'undefined') return;
+        localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }));
+    } catch {
+        // приватный режим/квота localStorage — не критично, просто нет кэша
+    }
+}
+
+/**
+ * Сбрасывает ТОЛЬКО персональные кэши конкретных зрителей (7TV-цвет/бейдж,
+ * личный FFZ-бейдж, Homies-бейдж). Раньше !refresh/!reload перезагружали
+ * только КАНАЛЬНЫЕ данные (FFZ-эмоуты/бейджи канала, 7TV emote-сет канала,
+ * список ботов), а персональные плюшки конкретных зрителей кэшируются
+ * в module-level Map'ах здесь и живут до перезагрузки страницы — то есть
+ * если зритель обновил себе бейдж/цвет на 7TV прямо во время стрима,
+ * !refresh это никак не подхватывал, помогал только F5. Не трогаем
+ * paintCache (сами определения пейнтов по id меняются крайне редко и
+ * не привязаны к конкретному зрителю) и idCache (twitch id по логину
+ * никогда не меняется) — сбрасывать их незачем.
+ */
+export function clearPersonalCosmeticsCache() {
+    cosmeticsCache.clear();
+    ffzPersonalBadgeCache.clear();
+    homiesBadgeCache.clear();
+}
+
 export interface TwitchUserInfo {
     id: string;
     login: string;
@@ -234,9 +289,16 @@ let paintCatalogPreloadPromise: Promise<void> | null = null;
  * первое сообщение с пейнтом придёт раньше, чем каталог догрузится,
  * fetch7TVPaintById() просто сходит в сеть сам, как раньше.
  */
+const STV_PAINT_CACHE_KEY = 'twitchtts_stv_paint_catalog_v1';
+
 export function preloadSevenTVPaintCatalog(): Promise<void> {
     if (!paintCatalogPreloadPromise) {
         paintCatalogPreloadPromise = (async () => {
+            const cached = readLocalCache<[string, SevenTVPaintDetails | null][]>(STV_PAINT_CACHE_KEY);
+            if (cached) {
+                cached.forEach(([id, details]) => { if (!paintCache.has(id)) paintCache.set(id, details); });
+                return;
+            }
             try {
                 const res = await fetch('https://7tv.io/v3/gql', {
                     method: 'POST',
@@ -252,6 +314,7 @@ export function preloadSevenTVPaintCatalog(): Promise<void> {
                     if (paintCache.has(paint.id)) return;
                     paintCache.set(paint.id, buildPaintDetails(paint));
                 });
+                writeLocalCache(STV_PAINT_CACHE_KEY, Array.from(paintCache.entries()));
             } catch (e) {
                 console.error('[7TV] Ошибка предзагрузки каталога пейнтов:', e);
             }
@@ -321,6 +384,7 @@ function normalizeFFZUrl(url: string | undefined | null): string | undefined {
 }
 
 let ffzBadgeDictionaryPromise: Promise<Map<number, { url: string; name: string }>> | null = null;
+const FFZ_BADGE_DICT_CACHE_KEY = 'twitchtts_ffz_badge_dict_v1';
 
 // Общий на весь сайт словарь всех FFZ-бейджей (id -> картинка+имя), грузим один раз.
 // Имя нужно, чтобы находить официальный бейдж "bot" по названию, а не по
@@ -328,6 +392,9 @@ let ffzBadgeDictionaryPromise: Promise<Map<number, { url: string; name: string }
 async function getFFZBadgeDictionary(): Promise<Map<number, { url: string; name: string }>> {
     if (!ffzBadgeDictionaryPromise) {
         ffzBadgeDictionaryPromise = (async () => {
+            const cached = readLocalCache<[number, { url: string; name: string }][]>(FFZ_BADGE_DICT_CACHE_KEY);
+            if (cached) return new Map(cached);
+
             const dict = new Map<number, { url: string; name: string }>();
             try {
                 const res = await fetch('https://api.frankerfacez.com/v1/badges');
@@ -337,6 +404,7 @@ async function getFFZBadgeDictionary(): Promise<Map<number, { url: string; name:
                     const url = normalizeFFZUrl(b.urls?.['2'] || b.urls?.['1'] || b.image);
                     if (url) dict.set(b.id, { url, name: b.name || '' });
                 });
+                writeLocalCache(FFZ_BADGE_DICT_CACHE_KEY, Array.from(dict.entries()));
             } catch (e) {
                 console.error('[FFZ] Ошибка загрузки словаря бейджей:', e);
             }
