@@ -39,8 +39,7 @@
         { label: '2x', value: 2 },
         { label: '3x', value: 3 }
     ];
-    // 800 — новый дефолт (жирный, но не "самый жирный"), 900 — на ступень
-    // толще, 400/600 — две ступени тоньше.
+
     const FONT_WEIGHT_PRESETS = [
         { label: 'Regular', value: '400' },
         { label: 'Semi-Bold', value: '600' },
@@ -114,12 +113,12 @@
         black: [] as string[],
         ytEnabled: false,
         ytMaxLen: 30,
-        chat: true,
-        tts: true,
+        chat: false,
+        tts: false,
         fontSize: 32,
         emoteMultiplier: 1,
         outlineSize: 4,
-        spacing: 10,
+        spacing: 8,
         fontWeight: "800",
         fontFamily: "Roboto",
         showBadgesTwitch: true,
@@ -129,8 +128,8 @@
         showStvColors: true,
         showHighlighted: true,
         showFirstTimeChatter: true,
-        hideCommands: false,
-        commandPrefixes: "!,#,=",
+        hideCommands: true,
+        commandPrefixes: "!,#,=,-",
         hideBots: true
     };
 
@@ -197,7 +196,7 @@
     // запроса к Twitch), отмасштабированный так, будто окно превью — кусок
     // реального холста OBS. Ширину этого "холста" можно подстроить под свой
     // реальный Browser Source.
-    let previewRefWidth = 1920;
+    let previewRefWidth = 800;
     const PREVIEW_REF_HEIGHT = 420;
 
     let previewContainerWidth = 0;
@@ -321,8 +320,8 @@
                 <div class="switch-row"><span>Show 7TV colors/paints</span><label class="switch"><input type="checkbox" bind:checked={config.showStvColors} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Highlight "Highlighted Messages"</span><label class="switch"><input type="checkbox" bind:checked={config.showHighlighted} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Highlight first-time chatters</span><label class="switch"><input type="checkbox" bind:checked={config.showFirstTimeChatter} /><span class="slider"></span></label></div>
-                <div class="switch-row"><span>Hide bots (auto-detected via Twitch/FFZ/BTTV)</span><label class="switch"><input type="checkbox" bind:checked={config.hideBots} /><span class="slider"></span></label></div>
-                <div class="switch-row"><span>Hide commands (!, #, = ...)</span><label class="switch"><input type="checkbox" bind:checked={config.hideCommands} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Hide bots</span><label class="switch"><input type="checkbox" bind:checked={config.hideBots} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Hide commands (!, #, =, - ...)</span><label class="switch"><input type="checkbox" bind:checked={config.hideCommands} /><span class="slider"></span></label></div>
                 {#if config.hideCommands}
                     <div class="yt-sub-settings" transition:fade>
                         <label for="commandPrefixes">Command prefixes (comma-separated):</label>
@@ -396,7 +395,6 @@
     .black-list-tag { background: #444; color: #fff; border-color: #333; }
     .tag-badge button { background: none; border: none; color: inherit; font-size: 16px; cursor: pointer; padding: 0; opacity: 0.6; }
 
-    /* Сегментированные группы пресетов размера (вместо голых слайдеров) */
     .control { margin-bottom: 16px; }
     .segmented { display: flex; gap: 6px; flex-wrap: wrap; }
     .segmented button {

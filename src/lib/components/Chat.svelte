@@ -50,7 +50,7 @@
     // обработка команд для TTS живёт отдельно в widget/+page.svelte и тут
     // никак не затрагивается, это только про то, что видно на оверлее.
     const hideCommands = urlParams.get('hideCommands') === 'true';
-    const commandPrefixes = (urlParams.get('commandPrefixes') || '!,#,=')
+    const commandPrefixes = (urlParams.get('commandPrefixes') || '!,#,=,-')
         .split(',').map((p) => p.trim()).filter(Boolean);
 
     // Автоопределение ботов канала — без ручного вписывания ников. Источник —
@@ -76,7 +76,7 @@
         fontWeight: urlParams.get('fontWeight') || '800',
         outlineColor: '#000000',
         outlineSize: urlParams.get('outlineSize') || '4px',
-        spacing: urlParams.get('spacing') || '10px',
+        spacing: urlParams.get('spacing') || '8px',
         fontFamily: urlParams.get('font') || 'sans-serif'
     };
 
