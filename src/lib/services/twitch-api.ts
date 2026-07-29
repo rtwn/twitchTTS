@@ -1,3 +1,5 @@
+import type { SevenTVEmoteEntry } from './message-parser';
+
 /**
  * Сервис для работы с внешними API (Twitch ID, 7TV, FFZ).
  */
@@ -63,27 +65,35 @@ export interface TwitchUserInfo {
     displayName: string;
 }
 
-const idCache = new Map<string, TwitchUserInfo | null>();
+const idCache = new Map<string, Promise<TwitchUserInfo | null>>();
 
-export async function resolveTwitchUser(login: string): Promise<TwitchUserInfo | null> {
+/**
+ * Раньше здесь (и в четырёх похожих функциях ниже) кэшировался только уже
+ * ГОТОВЫЙ результат: `if (cache.has(key)) return cache.get(key)!` — а
+ * запись в кэш происходила только ПОСЛЕ await. Если один и тот же новый
+ * зритель успевал написать два сообщения быстрее, чем приходил первый
+ * ответ, оба вызова видели кэш пустым и уходило два одинаковых запроса.
+ * Теперь кэшируется сам Promise — второй вызов просто дожидается уже
+ * запущенного первого запроса, а не запускает свой.
+ */
+export function resolveTwitchUser(login: string): Promise<TwitchUserInfo | null> {
     const key = login.toLowerCase();
-    if (idCache.has(key)) return idCache.get(key)!;
-
-    try {
-        const res = await fetch(`https://api.ivr.fi/v2/twitch/user?login=${encodeURIComponent(key)}`);
-        if (!res.ok) throw new Error(`IVR ${res.status}`);
-        const data = await res.json();
-        const entry = data?.[0];
-        if (!entry?.id) { idCache.set(key, null); return null; }
-
-        const info: TwitchUserInfo = { id: entry.id, login: entry.login, displayName: entry.displayName };
-        idCache.set(key, info);
-        return info;
-    } catch (e) {
-        console.error(`[Twitch] Не удалось получить ID для ${login}:`, e);
-        idCache.set(key, null);
-        return null;
+    if (!idCache.has(key)) {
+        idCache.set(key, (async () => {
+            try {
+                const res = await fetch(`https://api.ivr.fi/v2/twitch/user?login=${encodeURIComponent(key)}`);
+                if (!res.ok) throw new Error(`IVR ${res.status}`);
+                const data = await res.json();
+                const entry = data?.[0];
+                if (!entry?.id) return null;
+                return { id: entry.id, login: entry.login, displayName: entry.displayName } as TwitchUserInfo;
+            } catch (e) {
+                console.error(`[Twitch] Не удалось получить ID для ${login}:`, e);
+                return null;
+            }
+        })());
     }
+    return idCache.get(key)!;
 }
 
 /**
@@ -108,7 +118,7 @@ export async function fetchBTTVChannelBots(twitchId: string): Promise<string[]> 
 }
 
 export async function fetch7TVEmotesByTwitchId(twitchId: string) {
-    const emoteMap = new Map<string, { url: string; zeroWidth: boolean }>();
+    const emoteMap = new Map<string, SevenTVEmoteEntry>();
     try {
         const stvRes = await fetch(`https://7tv.io/v3/users/twitch/${twitchId}`);
         if (!stvRes.ok) return emoteMap;
@@ -164,36 +174,37 @@ export interface SevenTVUserCosmetics {
     paintDropShadow?: string;
 }
 
-const cosmeticsCache = new Map<string, SevenTVUserCosmetics | null>();
+const cosmeticsCache = new Map<string, Promise<SevenTVUserCosmetics | null>>();
 
-export async function fetch7TVUserCosmetics(twitchId: string): Promise<SevenTVUserCosmetics | null> {
-    if (cosmeticsCache.has(twitchId)) return cosmeticsCache.get(twitchId)!;
-    try {
-        const res = await fetch(`https://7tv.io/v3/users/twitch/${twitchId}`);
-        if (!res.ok) { cosmeticsCache.set(twitchId, null); return null; }
-        const data = await res.json();
+export function fetch7TVUserCosmetics(twitchId: string): Promise<SevenTVUserCosmetics | null> {
+    if (!cosmeticsCache.has(twitchId)) {
+        cosmeticsCache.set(twitchId, (async () => {
+            try {
+                const res = await fetch(`https://7tv.io/v3/users/twitch/${twitchId}`);
+                if (!res.ok) return null;
+                const data = await res.json();
 
-        const style = data.user?.style;
-        const paintColor = typeof style?.color === 'number' ? cssColorFromInt(style.color) : undefined;
-        const badgeUrl = style?.badge_id ? `https://cdn.7tv.app/badge/${style.badge_id}/2x.webp` : undefined;
+                const style = data.user?.style;
+                const paintColor = typeof style?.color === 'number' ? cssColorFromInt(style.color) : undefined;
+                const badgeUrl = style?.badge_id ? `https://cdn.7tv.app/badge/${style.badge_id}/2x.webp` : undefined;
 
-        let paintBackgroundImage: string | undefined;
-        let paintDropShadow: string | undefined;
-        if (style?.paint_id) {
-            const paint = await fetch7TVPaintById(style.paint_id);
-            if (paint) {
-                paintBackgroundImage = paint.backgroundImage;
-                paintDropShadow = paint.dropShadow;
+                let paintBackgroundImage: string | undefined;
+                let paintDropShadow: string | undefined;
+                if (style?.paint_id) {
+                    const paint = await fetch7TVPaintById(style.paint_id);
+                    if (paint) {
+                        paintBackgroundImage = paint.backgroundImage;
+                        paintDropShadow = paint.dropShadow;
+                    }
+                }
+
+                return { badgeUrl, paintColor, paintBackgroundImage, paintDropShadow } as SevenTVUserCosmetics;
+            } catch (e) {
+                return null;
             }
-        }
-
-        const cosmetics: SevenTVUserCosmetics = { badgeUrl, paintColor, paintBackgroundImage, paintDropShadow };
-        cosmeticsCache.set(twitchId, cosmetics);
-        return cosmetics;
-    } catch (e) {
-        cosmeticsCache.set(twitchId, null);
-        return null;
+        })());
     }
+    return cosmeticsCache.get(twitchId)!;
 }
 
 interface SevenTVPaintDetails {
@@ -201,7 +212,7 @@ interface SevenTVPaintDetails {
     dropShadow?: string;     // готовое значение для CSS filter
 }
 
-const paintCache = new Map<string, SevenTVPaintDetails | null>();
+const paintCache = new Map<string, Promise<SevenTVPaintDetails | null>>();
 
 const COSMETICS_QUERY = `query GetCosmetics($list: [ObjectID!]) {
     cosmetics(list: $list) {
@@ -227,33 +238,32 @@ function buildPaintDetails(paint: any): SevenTVPaintDetails | null {
     return backgroundImage ? { backgroundImage, dropShadow } : null;
 }
 
-async function fetch7TVPaintById(paintId: string): Promise<SevenTVPaintDetails | null> {
-    if (paintCache.has(paintId)) return paintCache.get(paintId)!;
+function fetch7TVPaintById(paintId: string): Promise<SevenTVPaintDetails | null> {
+    if (!paintCache.has(paintId)) {
+        paintCache.set(paintId, (async () => {
+            try {
+                const res = await fetch('https://7tv.io/v3/gql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        operationName: 'GetCosmetics',
+                        variables: { list: [paintId] },
+                        query: COSMETICS_QUERY
+                    })
+                });
+                if (!res.ok) return null;
 
-    try {
-        const res = await fetch('https://7tv.io/v3/gql', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                operationName: 'GetCosmetics',
-                variables: { list: [paintId] },
-                query: COSMETICS_QUERY
-            })
-        });
-        if (!res.ok) { paintCache.set(paintId, null); return null; }
+                const json = await res.json();
+                const paint = json?.data?.cosmetics?.paints?.[0];
+                if (!paint) return null;
 
-        const json = await res.json();
-        const paint = json?.data?.cosmetics?.paints?.[0];
-        if (!paint) { paintCache.set(paintId, null); return null; }
-
-        const details = buildPaintDetails(paint);
-        paintCache.set(paintId, details);
-        return details;
-    } catch (e) {
-        console.error('[7TV] Ошибка загрузки пейнта:', e);
-        paintCache.set(paintId, null);
-        return null;
+                return buildPaintDetails(paint);
+            } catch (e) {
+                return null;
+            }
+        })());
     }
+    return paintCache.get(paintId)!;
 }
 
 const ALL_PAINTS_QUERY = `query GetAllPaints {
@@ -296,7 +306,9 @@ export function preloadSevenTVPaintCatalog(): Promise<void> {
         paintCatalogPreloadPromise = (async () => {
             const cached = readLocalCache<[string, SevenTVPaintDetails | null][]>(STV_PAINT_CACHE_KEY);
             if (cached) {
-                cached.forEach(([id, details]) => { if (!paintCache.has(id)) paintCache.set(id, details); });
+                cached.forEach(([id, details]) => {
+                    if (!paintCache.has(id)) paintCache.set(id, Promise.resolve(details));
+                });
                 return;
             }
             try {
@@ -312,9 +324,15 @@ export function preloadSevenTVPaintCatalog(): Promise<void> {
                 paints.forEach((paint: any) => {
                     // Не затираем то, что уже могло прийти точечным запросом раньше
                     if (paintCache.has(paint.id)) return;
-                    paintCache.set(paint.id, buildPaintDetails(paint));
+                    paintCache.set(paint.id, Promise.resolve(buildPaintDetails(paint)));
                 });
-                writeLocalCache(STV_PAINT_CACHE_KEY, Array.from(paintCache.entries()));
+
+                // paintCache теперь хранит Promise — для localStorage (обычный
+                // JSON) нужны уже готовые значения, а не сами промисы.
+                const resolvedEntries = await Promise.all(
+                    Array.from(paintCache.entries()).map(async ([id, p]) => [id, await p] as const)
+                );
+                writeLocalCache(STV_PAINT_CACHE_KEY, resolvedEntries);
             } catch (e) {
                 console.error('[7TV] Ошибка предзагрузки каталога пейнтов:', e);
             }
@@ -401,7 +419,7 @@ async function getFFZBadgeDictionary(): Promise<Map<number, { url: string; name:
                 if (!res.ok) return dict;
                 const data = await res.json();
                 (data.badges || []).forEach((b: any) => {
-                    const url = normalizeFFZUrl(b.urls?.['2'] || b.urls?.['1'] || b.image);
+                    const url = normalizeFFZUrl(b.urls?.['4'] || b.urls?.['2'] || b.urls?.['1'] || b.image);
                     if (url) dict.set(b.id, { url, name: b.name || '' });
                 });
                 writeLocalCache(FFZ_BADGE_DICT_CACHE_KEY, Array.from(dict.entries()));
@@ -474,29 +492,28 @@ export async function fetchFFZBadges(nickname: string): Promise<FFZBadges> {
  * Раньше этот источник вообще не запрашивался, поэтому Supporter не
  * показывался никогда, вне зависимости от канала.
  */
-const ffzPersonalBadgeCache = new Map<string, { urls: string[]; isBot: boolean }>();
+const ffzPersonalBadgeCache = new Map<string, Promise<{ urls: string[]; isBot: boolean }>>();
 
-export async function fetchFFZPersonalBadges(login: string): Promise<{ urls: string[]; isBot: boolean }> {
+export function fetchFFZPersonalBadges(login: string): Promise<{ urls: string[]; isBot: boolean }> {
     const key = login.toLowerCase();
-    if (ffzPersonalBadgeCache.has(key)) return ffzPersonalBadgeCache.get(key)!;
-
-    try {
-        const [res, dict] = await Promise.all([
-            fetch(`https://api.frankerfacez.com/v1/user/${key}`),
-            getFFZBadgeDictionary()
-        ]);
-        if (!res.ok) { const empty = { urls: [], isBot: false }; ffzPersonalBadgeCache.set(key, empty); return empty; }
-        const data = await res.json();
-        const badgeIds: number[] = data.user?.badges || [];
-        const badges = badgeIds.map((id) => dict.get(id)).filter((b): b is { url: string; name: string } => !!b);
-        const result = { urls: badges.map((b) => b.url), isBot: badges.some((b) => b.name === 'bot') };
-        ffzPersonalBadgeCache.set(key, result);
-        return result;
-    } catch (e) {
-        const empty = { urls: [], isBot: false };
-        ffzPersonalBadgeCache.set(key, empty);
-        return empty;
+    if (!ffzPersonalBadgeCache.has(key)) {
+        ffzPersonalBadgeCache.set(key, (async () => {
+            try {
+                const [res, dict] = await Promise.all([
+                    fetch(`https://api.frankerfacez.com/v1/user/${key}`),
+                    getFFZBadgeDictionary()
+                ]);
+                if (!res.ok) return { urls: [], isBot: false };
+                const data = await res.json();
+                const badgeIds: number[] = data.user?.badges || [];
+                const badges = badgeIds.map((id) => dict.get(id)).filter((b): b is { url: string; name: string } => !!b);
+                return { urls: badges.map((b) => b.url), isBot: badges.some((b) => b.name === 'bot') };
+            } catch (e) {
+                return { urls: [], isBot: false };
+            }
+        })());
     }
+    return ffzPersonalBadgeCache.get(key)!;
 }
 
 /**
@@ -505,23 +522,25 @@ export async function fetchFFZPersonalBadges(login: string): Promise<{ urls: str
  * `fileId` на конкретного зрителя (/api/v2/badges/{twitchId}), сама
  * картинка достаётся по тому же CDN-паттерну, что виден в примере
  * bulk-списка (`cdn.chatterinohomies.com/badges/{id}/{size}.webp`) —
- * 36.webp соответствует размеру "image2" из документации.
+ * 72.webp соответствует самому крупному варианту ("image3" из
+ * документации) — на пресете текста Large бейдж не выглядит мягким.
  */
-const homiesBadgeCache = new Map<string, string | undefined>();
+const homiesBadgeCache = new Map<string, Promise<string | undefined>>();
 
-export async function fetchHomiesBadge(twitchId: string): Promise<string | undefined> {
-    if (homiesBadgeCache.has(twitchId)) return homiesBadgeCache.get(twitchId);
-    try {
-        const res = await fetch(`https://chatterinohomies.com/api/v2/badges/${twitchId}`);
-        if (!res.ok) { homiesBadgeCache.set(twitchId, undefined); return undefined; }
-        const data = await res.json();
-        const entry = data?.data?.[0];
-        const url = entry?.fileId ? `https://cdn.chatterinohomies.com/badges/${entry.fileId}/36.webp` : undefined;
-        homiesBadgeCache.set(twitchId, url);
-        return url;
-    } catch (e) {
-        console.error('[Homies] Ошибка загрузки бейджа:', e);
-        homiesBadgeCache.set(twitchId, undefined);
-        return undefined;
+export function fetchHomiesBadge(twitchId: string): Promise<string | undefined> {
+    if (!homiesBadgeCache.has(twitchId)) {
+        homiesBadgeCache.set(twitchId, (async () => {
+            try {
+                const res = await fetch(`https://chatterinohomies.com/api/v2/badges/${twitchId}`);
+                if (!res.ok) return undefined;
+                const data = await res.json();
+                const entry = data?.data?.[0];
+                return entry?.fileId ? `https://cdn.chatterinohomies.com/badges/${entry.fileId}/72.webp` : undefined;
+            } catch (e) {
+                console.error('[Homies] Ошибка загрузки бейджа:', e);
+                return undefined;
+            }
+        })());
     }
+    return homiesBadgeCache.get(twitchId)!;
 }

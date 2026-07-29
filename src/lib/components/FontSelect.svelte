@@ -4,33 +4,83 @@
 
     let open = false;
     let rootEl: HTMLDivElement;
+    let triggerEl: HTMLButtonElement;
+    let optionEls: HTMLButtonElement[] = [];
+    // Индекс подсвеченного (не обязательно ещё выбранного) варианта при
+    // навигации стрелками — обычный <select> умеет это бесплатно, кастомный
+    // дропдаун — только если явно реализовать самому.
+    let activeIndex = 0;
 
     $: current = fonts.find((f) => f.name === selected) ?? fonts[0];
 
-    function choose(name: string) {
-        selected = name;
+    function openMenu() {
+        open = true;
+        activeIndex = Math.max(0, fonts.findIndex((f) => f.name === selected));
+    }
+
+    function closeMenu(returnFocus: boolean) {
         open = false;
+        if (returnFocus) triggerEl?.focus();
+    }
+
+    function choose(name: string, returnFocus: boolean) {
+        selected = name;
+        closeMenu(returnFocus);
     }
 
     function handleWindowClick(e: MouseEvent) {
         if (open && rootEl && !rootEl.contains(e.target as Node)) open = false;
     }
 
-    function handleKeydown(e: KeyboardEvent) {
-        if (e.key === 'Escape') open = false;
+    function handleTriggerKeydown(e: KeyboardEvent) {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            if (!open) openMenu();
+        }
+    }
+
+    // Стрелками — по списку, Enter/Space — выбрать, Escape — закрыть и
+    // вернуть фокус на саму кнопку-триггер (без этого после закрытия фокус
+    // просто терялся, обычному <select> он остаётся на самом себе бесплатно).
+    function handleMenuKeydown(e: KeyboardEvent) {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeMenu(true);
+            return;
+        }
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            activeIndex = Math.min(activeIndex + 1, fonts.length - 1);
+            optionEls[activeIndex]?.focus();
+            return;
+        }
+        if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            activeIndex = Math.max(activeIndex - 1, 0);
+            optionEls[activeIndex]?.focus();
+            return;
+        }
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            choose(fonts[activeIndex].name, true);
+        }
     }
 </script>
 
-<svelte:window on:click={handleWindowClick} on:keydown={handleKeydown} />
+<svelte:window on:click={handleWindowClick} />
 
 <div class="form-group">
     <label for="font-select-trigger">Font Family</label>
     <div class="font-select" bind:this={rootEl}>
         <button
             id="font-select-trigger"
+            bind:this={triggerEl}
             type="button"
             class="font-select-trigger"
-            on:click={() => (open = !open)}
+            aria-haspopup="listbox"
+            aria-expanded={open}
+            on:click={() => (open ? closeMenu(false) : openMenu())}
+            on:keydown={handleTriggerKeydown}
             style="font-family: {current?.family};"
         >
             <span>{current?.name}</span>
@@ -40,14 +90,18 @@
         </button>
 
         {#if open}
-            <div class="font-select-menu" role="listbox">
-                {#each fonts as font}
+            <div class="font-select-menu" role="listbox" tabindex="-1" on:keydown={handleMenuKeydown}>
+                {#each fonts as font, i}
                     <button
                         type="button"
+                        bind:this={optionEls[i]}
                         class="font-option"
                         class:active={font.name === selected}
+                        role="option"
+                        aria-selected={font.name === selected}
+                        tabindex={i === activeIndex ? 0 : -1}
                         style="font-family: {font.family};"
-                        on:click={() => choose(font.name)}
+                        on:click={() => choose(font.name, true)}
                     >
                         {font.name}
                     </button>
@@ -80,9 +134,16 @@
         text-align: left;
     }
 
-    .font-select-trigger:hover, .font-select-trigger:focus {
+    /* Раньше было outline: none без замены — фокус для клавиатурной
+       навигации становился менее заметным, чем стандартный контур браузера.
+       box-shadow-кольцо здесь как раз такая замена. */
+    .font-select-trigger:hover {
+        border-color: #7c3aed;
+    }
+    .font-select-trigger:focus-visible {
         outline: none;
         border-color: #7c3aed;
+        box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.35);
     }
 
     .chevron {
@@ -125,6 +186,12 @@
 
     .font-option:hover {
         background: #f3f4f6;
+    }
+
+    .font-option:focus-visible {
+        outline: none;
+        background: #f3f4f6;
+        box-shadow: inset 0 0 0 2px #7c3aed;
     }
 
     .font-option.active {

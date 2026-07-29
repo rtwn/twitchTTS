@@ -5,6 +5,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { page } from '$app/state';
+    import { ALL_STREAMLABS_VOICES } from '$lib/constants/voices';
 
     const params = page.url.searchParams;
     const ttsVoiceDefault = params.get('voice') || 'Brian';
@@ -27,7 +28,16 @@
     let ytTimeout: any;
     let globalVolume = 100;
 
-    const availableVoices = ["Aditi","Amy","Astrid","Bianca","Brian","Camila","Carla","Carmen","Celine","Chantal","Conchita","Cristiano","Dora","Emma","Enrique","Ewa","Filiz","Geraint","Giorgio","Gwyneth","Hans","Ines","Ivy","Jacek","Jan","Joanna","Joey","Justin","Karl","Kendra","Kimberly","Lea","Liv","Lotte","Lucia","Lupe","Mads","Maja","Marlene","Mathieu","Matthew","Maxim","Mia","Miguel","Mizuki","Naja","Nicole","Penelope","Raveena","Ricardo","Ruben","Russell","Salli","Seoyeon","Takumi","Tatyana","Vicki","Vitoria","Zeina","Zhiyu"];
+    // Раньше тут был отдельный захардкоженный список имён голосов, который
+    // держали в актуальном состоянии вручную — он успел разойтись с тем
+    // списком, что использует сервер для валидации (`ALL_STREAMLABS_VOICES`
+    // в voices.ts): там был лишний "Gwyneth", которого сервер не знает, из-за
+    // чего `!tts -v Gwyneth текст` клиент считал валидным, а сервер вместо
+    // этого тихо подставлял Brian. Импорт того же самого списка, что и на
+    // странице настроек/сервере, делает такое расхождение впредь невозможным.
+    // Сравниваем по `value` — оно всегда латиница без эмодзи-флагов, флаги
+    // есть только в `label` для выпадающего списка на странице настроек.
+    const availableVoices = ALL_STREAMLABS_VOICES.map(v => v.value);
 
     function isUserAllowed(user: string, flags: any) {
         const lower = user.toLowerCase();
@@ -38,7 +48,7 @@
     }
 
     function extractVideoId(url: string) {
-        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+        const regExp = /^.*(youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
         const match = url.match(regExp);
         return (match && match[2].length === 11) ? match[2] : null;
     }
@@ -62,6 +72,14 @@
             .replace(/[^\p{L}\p{N}\s!,?.]/gu, '')
             .replace(/\s+/g, ' ')
             .trim();
+    }
+
+    // Один и тот же паттерн "остановить, отпустить очередь, попробовать
+    // сыграть следующее" повторялся пятью разными копипастами по всему
+    // файлу — вынес в одно место, чтобы не расходились случайно.
+    function finishAndAdvance() {
+        isPlaying = false;
+        setTimeout(processQueue, 100);
     }
 
     async function processQueue() {
@@ -90,13 +108,12 @@
                 if (url && audioEl) {
                     audioEl.volume = globalVolume / 100;
                     audioEl.src = url;
-                    audioEl.play().catch(() => { isPlaying = false; setTimeout(processQueue, 100); });
-                    audioEl.onended = () => { isPlaying = false; setTimeout(processQueue, 100); };
+                    audioEl.play().catch(finishAndAdvance);
+                    audioEl.onended = finishAndAdvance;
                 } else {
-                    isPlaying = false;
-                    setTimeout(processQueue, 100);
+                    finishAndAdvance();
                 }
-            } catch { isPlaying = false; setTimeout(processQueue, 100); }
+            } catch { finishAndAdvance(); }
         }
     }
 
@@ -104,13 +121,13 @@
         clearTimeout(ytTimeout);
         if (audioEl) { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); }
         if (isYtReady && ytPlayer?.stopVideo) ytPlayer.stopVideo();
-        isPlaying = false;
-        setTimeout(processQueue, 100);
+        finishAndAdvance();
     }
 
     export function clearAll() { msgQueue = []; skipAll(); }
 
     export function setVolume(val: number) {
+        if (isNaN(val)) return;
         globalVolume = Math.min(Math.max(val, 0), 100);
         if (isYtReady && ytPlayer) ytPlayer.setVolume(globalVolume);
         if (audioEl) audioEl.volume = globalVolume / 100;
@@ -121,6 +138,9 @@
         const msgTrim = message.trim();
         if (cmd === 'skip' && (flags.broadcaster || flags.mod)) { skipAll(); return; }
         if (cmd === 'clear' && (flags.broadcaster || flags.mod)) { clearAll(); return; }
+        // Раньше parseInt('') / parseInt('abc') давал NaN и setVolume молча
+        // ставил громкость в NaN навсегда (Math.max(NaN, 0) тоже NaN) — теперь
+        // setVolume сам игнорирует NaN, невалидный !vol просто ничего не делает.
         if (cmd === 'vol' && (flags.broadcaster || flags.mod)) { setVolume(parseInt(msgTrim)); return; }
 
         if (cmd === 'play' && ytEnabled && isUserAllowed(user, flags)) {
@@ -159,8 +179,8 @@
                 playerVars: { 'autoplay': 1, 'controls': 0, 'disablekb': 1 },
                 events: {
                     'onReady': () => { isYtReady = true; },
-                    'onStateChange': (e: any) => { if (e.data === 0) { isPlaying = false; setTimeout(processQueue, 100); } },
-                    'onError': () => { isPlaying = false; setTimeout(processQueue, 100); }
+                    'onStateChange': (e: any) => { if (e.data === 0) finishAndAdvance(); },
+                    'onError': () => finishAndAdvance()
                 }
             });
         };

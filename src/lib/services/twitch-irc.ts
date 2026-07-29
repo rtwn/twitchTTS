@@ -39,6 +39,13 @@ export interface ClearChatEvent {
     targetUser?: string;   // если undefined — очистка всего чата
 }
 
+// CLEARMSG — модератор удалил ОДНО конкретное сообщение (не таймаут/бан
+// всего пользователя, для этого есть отдельный CLEARCHAT выше).
+export interface ClearMsgEvent {
+    channel: string;
+    targetMsgId: string;
+}
+
 interface IRCTagMap { [key: string]: string; }
 
 interface ParsedIRC {
@@ -78,6 +85,7 @@ function parseIRCMessage(raw: string): ParsedIRC | null {
 
     if (rest.startsWith('@')) {
         const sp = rest.indexOf(' ');
+        if (sp === -1) return null; // повреждённая/обрезанная строка — не пытаемся угадать
         const rawTags = rest.slice(1, sp);
         rest = rest.slice(sp + 1);
         rawTags.split(';').forEach((pair) => {
@@ -92,6 +100,7 @@ function parseIRCMessage(raw: string): ParsedIRC | null {
     let prefix = '';
     if (rest.startsWith(':')) {
         const sp = rest.indexOf(' ');
+        if (sp === -1) return null;
         prefix = rest.slice(1, sp);
         rest = rest.slice(sp + 1);
     }
@@ -134,6 +143,7 @@ function parseEmotes(raw: string | undefined): Record<string, string[]> {
 
 type MessageHandler = (msg: ChatMessage) => void;
 type ClearChatHandler = (evt: ClearChatEvent) => void;
+type ClearMsgHandler = (evt: ClearMsgEvent) => void;
 type StatusHandler = () => void;
 
 export class TwitchIRC {
@@ -146,6 +156,7 @@ export class TwitchIRC {
 
     private readonly messageHandlers: MessageHandler[] = [];
     private readonly clearChatHandlers: ClearChatHandler[] = [];
+    private readonly clearMsgHandlers: ClearMsgHandler[] = [];
     private readonly connectHandlers: StatusHandler[] = [];
     private readonly disconnectHandlers: StatusHandler[] = [];
 
@@ -155,6 +166,7 @@ export class TwitchIRC {
 
     onMessage(handler: MessageHandler) { this.messageHandlers.push(handler); }
     onClearChat(handler: ClearChatHandler) { this.clearChatHandlers.push(handler); }
+    onClearMsg(handler: ClearMsgHandler) { this.clearMsgHandlers.push(handler); }
     // onConnect/onDisconnect сейчас не используются виджетом чата (ему хватает
     // onMessage/onClearChat), но это осознанно оставлено в публичном API
     // класса — стандартные хуки для любого потребителя WebSocket-обёртки
@@ -240,6 +252,14 @@ export class TwitchIRC {
                     channel: targetChannel,
                     targetUser: parsed.trailing || undefined
                 }));
+                break;
+            }
+
+            case 'CLEARMSG': {
+                const targetMsgId = parsed.tags['target-msg-id'];
+                if (!targetMsgId) break; // без id нечего удалять
+                const targetChannel = (parsed.params[0] || '').replace('#', '');
+                this.clearMsgHandlers.forEach((h) => h({ channel: targetChannel, targetMsgId }));
                 break;
             }
 

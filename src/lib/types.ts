@@ -7,15 +7,3 @@ export interface VoiceGroup {
     lang: string;
     voices: Voice[];
 }
-
-export interface TTSConfig {
-    channel: string;
-    voice: string;
-    mods: boolean;
-    vips: boolean;
-    customVoice: boolean;
-    white: string;
-    black: string;
-    ytEnabled: boolean;
-    ytMaxLen: number;
-}

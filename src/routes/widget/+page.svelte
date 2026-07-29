@@ -25,10 +25,11 @@
     let ircConnected = false;
 
     function parseCommand(msg: ChatMessage): { command: string; rest: string } | null {
-        if (!msg.text.startsWith('!')) return null;
-        const spaceIdx = msg.text.indexOf(' ');
-        const command = (spaceIdx === -1 ? msg.text.slice(1) : msg.text.slice(1, spaceIdx));
-        const rest = spaceIdx === -1 ? '' : msg.text.slice(spaceIdx + 1);
+        const text = msg.text.trimStart();
+        if (!text.startsWith('!')) return null;
+        const spaceIdx = text.indexOf(' ');
+        const command = (spaceIdx === -1 ? text.slice(1) : text.slice(1, spaceIdx));
+        const rest = spaceIdx === -1 ? '' : text.slice(spaceIdx + 1);
         return { command, rest };
     }
 
@@ -40,7 +41,7 @@
         irc.onConnect(() => { ircConnected = true; });
         irc.onDisconnect(() => { ircConnected = false; });
 
-        irc.onMessage((msg) => {
+        irc.onMessage(async (msg) => {
             if (chatEnabled && chatRef) chatRef.addMessage(msg);
 
             const parsed = parseCommand(msg);
@@ -54,9 +55,11 @@
             if (isPrivileged && chatEnabled && chatRef) {
                 if (parsed.command === 'refresh') { chatRef.refreshEmotes(); return; }
                 if (parsed.command === 'reload') {
-                    chatRef.reloadChat();
-                    // Полная перезагрузка включает и сам сокет чата — не
-                    // только данные канала (бейджи/эмоуты), которые перегружает reloadChat().
+                    // Дожидаемся полной перезагрузки данных канала (бейджи/
+                    // эмоуты), прежде чем переподключать сам сокет — иначе
+                    // новые сообщения могли прийти раньше, чем данные успели
+                    // обновиться, и отрендериться со старыми бейджами/эмоутами.
+                    await chatRef.reloadChat();
                     irc?.disconnect();
                     irc?.connect(channel);
                     return;
@@ -73,6 +76,10 @@
             if (!chatRef) return;
             if (evt.targetUser) chatRef.clearUser(evt.targetUser);
             else chatRef.clearAllMessages();
+        });
+
+        irc.onClearMsg((evt) => {
+            if (chatRef) chatRef.clearMessage(evt.targetMsgId);
         });
 
         irc.connect(channel);

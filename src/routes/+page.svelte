@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { onMount } from 'svelte';
     import VoiceSelect from '$lib/components/VoiceSelect.svelte';
     import FontSelect from '$lib/components/FontSelect.svelte';
     import { fade, fly } from 'svelte/transition';
@@ -39,7 +40,8 @@
         { label: '2x', value: 2 },
         { label: '3x', value: 3 }
     ];
-
+    // 800 — новый дефолт (жирный, но не "самый жирный"), 900 — на ступень
+    // толще, 400/600 — две ступени тоньше.
     const FONT_WEIGHT_PRESETS = [
         { label: 'Regular', value: '400' },
         { label: 'Semi-Bold', value: '600' },
@@ -54,7 +56,7 @@
 
     function generateTTSLink(origin: string, config: any) {
         const url = new URL(`${origin}/widget`);
-        url.searchParams.set('channel', config.channel);
+        url.searchParams.set('channel', config.channel.trim());
         url.searchParams.set('chat', config.chat.toString());
         url.searchParams.set('tts', config.tts.toString());
 
@@ -65,7 +67,6 @@
             url.searchParams.set('spacing', config.spacing + 'px');
             url.searchParams.set('fontWeight', config.fontWeight);
             url.searchParams.set('font', config.fontFamily);
-            url.searchParams.set('outlineColor', '#000000');
 
             url.searchParams.set('showBadgesTwitch', config.showBadgesTwitch.toString());
             url.searchParams.set('showBadgesFFZ', config.showBadgesFFZ.toString());
@@ -200,7 +201,11 @@
     const PREVIEW_REF_HEIGHT = 420;
 
     let previewContainerWidth = 0;
-    $: previewScale = previewContainerWidth > 0 ? previewContainerWidth / previewRefWidth : 0.001;
+    // Math.max(previewRefWidth, 100) — защита на случай, если поле вручную
+    // очистят или впишут 0/отрицательное число: min="640" в <input> не
+    // мешает временно получить 0 при ручном стирании поля, а без защиты
+    // previewScale ушёл бы в Infinity и превью визуально сломалось бы.
+    $: previewScale = previewContainerWidth > 0 ? previewContainerWidth / Math.max(previewRefWidth, 100) : 0.001;
 
     let previewSrc = '';
     let previewDebounceTimer: ReturnType<typeof setTimeout>;
@@ -219,14 +224,57 @@
     // изменении любой из настроек чата (Svelte 4 отслеживает присвоения
     // вида config.x = ..., которые делает bind:value/bind:checked).
     $: config, updatePreviewSrc();
+
+    // ---- Сохранение настроек между визитами ----
+    // Раньше ничего не сохранялось: обновили страницу — все настройки (имя
+    // канала, все тумблеры, размеры) сбрасывались на дефолт. Сохраняем
+    // config в localStorage при любом изменении и подгружаем при заходе.
+    const SETTINGS_STORAGE_KEY = 'twitchtts_settings_v1';
+    let settingsLoaded = false; // до первой загрузки не сохраняем — иначе
+                                 // дефолтный config затёр бы уже сохранённый
+
+    function loadSavedConfig() {
+        try {
+            const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+            if (!raw) return;
+            const saved = JSON.parse(raw);
+            // Спред в этом порядке: значения из saved перекрывают дефолты,
+            // но поля, которых в saved ещё не было (добавили новую настройку
+            // уже после того, как кто-то сохранил старую версию), берутся из
+            // дефолтного config, а не остаются undefined.
+            config = { ...config, ...saved };
+        } catch {
+            // битые/недоступные данные в localStorage — просто остаёмся на дефолтах
+        }
+    }
+
+    let saveDebounceTimer: ReturnType<typeof setTimeout>;
+    function saveConfig() {
+        if (!browser || !settingsLoaded) return;
+        clearTimeout(saveDebounceTimer);
+        saveDebounceTimer = setTimeout(() => {
+            try {
+                localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(config));
+            } catch {
+                // квота/приватный режим localStorage — не критично, просто не сохранится
+            }
+        }, 300);
+    }
+
+    $: config, saveConfig();
+
+    onMount(() => {
+        loadSavedConfig();
+        settingsLoaded = true;
+    });
 </script>
 
 <svelte:head>
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;600;800;900&family=Lato:wght@400;700;900&family=Noto+Sans:wght@400;600;800;900&family=Baloo+Tammudu+2:wght@400;600;800&family=Source+Code+Pro:wght@400;600;800;900&family=Comfortaa:wght@400;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;600;800;900&family=Lato:wght@400;600;700;800;900&family=Noto+Sans:wght@400;600;800;900&family=Baloo+Tammudu+2:wght@400;600;700;800;900&family=Source+Code+Pro:wght@400;600;800;900&family=Comfortaa:wght@400;600;700&display=swap" rel="stylesheet">
 </svelte:head>
 
 <main>
-    <h1>Twitch Overlay Generator</h1>
+    <h1>Chat Overlay Generator</h1>
 
     <div class="form-group">
         <label for="channel">Twitch Channel:</label>
@@ -240,7 +288,7 @@
             <label class="switch"><input type="checkbox" bind:checked={config.chat} /><span class="slider"></span></label>
         </div>
         <div class="switch-row">
-            <span>TTS & Media (Voice commands)</span>
+            <span>Text-to-Speech</span>
             <label class="switch"><input type="checkbox" bind:checked={config.tts} /><span class="slider"></span></label>
         </div>
     </div>
@@ -248,7 +296,7 @@
     {#if config.chat}
         <div class="preview-box" transition:fly={{ y: -10, duration: 300 }}>
             <div class="preview-label-row">
-                <div class="preview-label">Live Preview</div>
+                <div class="preview-label">Preview</div>
                 <label class="preview-ref-width">
                     Reference OBS width
                     <input type="number" min="640" max="3840" step="10" bind:value={previewRefWidth} />
@@ -306,7 +354,7 @@
             </div>
             <div class="control">
                 <label>Message Spacing: {config.spacing}px</label>
-                <input type="range" min="0" max="15" bind:value={config.spacing} />
+                <input type="range" min="0" max="16" bind:value={config.spacing} />
             </div>
 
             <FontSelect bind:selected={config.fontFamily} {fonts} />
@@ -320,7 +368,7 @@
                 <div class="switch-row"><span>Show 7TV colors/paints</span><label class="switch"><input type="checkbox" bind:checked={config.showStvColors} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Highlight "Highlighted Messages"</span><label class="switch"><input type="checkbox" bind:checked={config.showHighlighted} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Highlight first-time chatters</span><label class="switch"><input type="checkbox" bind:checked={config.showFirstTimeChatter} /><span class="slider"></span></label></div>
-                <div class="switch-row"><span>Hide bots</span><label class="switch"><input type="checkbox" bind:checked={config.hideBots} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Hide bots (auto-detected via Twitch/FFZ/BTTV)</span><label class="switch"><input type="checkbox" bind:checked={config.hideBots} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Hide commands (!, #, =, - ...)</span><label class="switch"><input type="checkbox" bind:checked={config.hideCommands} /><span class="slider"></span></label></div>
                 {#if config.hideCommands}
                     <div class="yt-sub-settings" transition:fade>
@@ -341,7 +389,7 @@
                 <div class="switch-row"><span>Allow Moderators</span><label class="switch"><input type="checkbox" bind:checked={config.mods} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Allow VIPs</span><label class="switch"><input type="checkbox" bind:checked={config.vips} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Allow custom voice</span><label class="switch"><input type="checkbox" bind:checked={config.customVoice} /><span class="slider"></span></label></div>
-                <div class="switch-row"><span>Enable YouTube Audio</span><label class="switch"><input type="checkbox" bind:checked={config.ytEnabled} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Enable YouTube (as Audio)</span><label class="switch"><input type="checkbox" bind:checked={config.ytEnabled} /><span class="slider"></span></label></div>
                 {#if config.ytEnabled}
                     <div class="yt-sub-settings" transition:fade>
                         <label for="ytMaxLen">Max duration (sec):</label>
@@ -353,14 +401,14 @@
                 <label>Whitelist:</label>
                 <div class="tags-input">
                     {#each config.white as tag, i}<span class="tag-badge" in:fade>{tag} <button on:click={() => removeTag('white', i)}>×</button></span>{/each}
-                    <input type="text" bind:value={whiteInput} on:keydown={(e) => addTag('white', e)} placeholder={config.white.length === 0 ? "Type nick and press Space..." : ""} />
+                    <input type="text" bind:value={whiteInput} on:keydown={(e) => addTag('white', e)} placeholder={config.white.length === 0 ? "Type nickname and press Space..." : ""} />
                 </div>
             </div>
             <div class="form-group">
                 <label>Blacklist:</label>
                 <div class="tags-input">
                     {#each config.black as tag, i}<span class="tag-badge black-list-tag" in:fade>{tag} <button on:click={() => removeTag('black', i)}>×</button></span>{/each}
-                    <input type="text" bind:value={blackInput} on:keydown={(e) => addTag('black', e)} placeholder={config.black.length === 0 ? "Type nick and press Space..." : ""} />
+                    <input type="text" bind:value={blackInput} on:keydown={(e) => addTag('black', e)} placeholder={config.black.length === 0 ? "Type nickname and press Space..." : ""} />
                 </div>
             </div>
         </div>
@@ -395,6 +443,7 @@
     .black-list-tag { background: #444; color: #fff; border-color: #333; }
     .tag-badge button { background: none; border: none; color: inherit; font-size: 16px; cursor: pointer; padding: 0; opacity: 0.6; }
 
+    /* Сегментированные группы пресетов размера (вместо голых слайдеров) */
     .control { margin-bottom: 16px; }
     .segmented { display: flex; gap: 6px; flex-wrap: wrap; }
     .segmented button {

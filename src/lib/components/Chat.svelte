@@ -13,6 +13,8 @@
         clearPersonalCosmeticsCache
     } from '$lib/services/twitch-api';
     import type { ChatMessage } from '$lib/services/twitch-irc';
+    import { parseMessage, type Fragment, type SevenTVEmoteEntry } from '$lib/services/message-parser';
+    import { buildPreviewEmoteMaps, PREVIEW_MESSAGES } from '$lib/services/chat-preview-data';
     import { page } from '$app/state';
 
     export let channel: string;
@@ -72,20 +74,16 @@
     let chatConfig = {
         fontSize: urlParams.get('fontSize') || '32px',
         emoteMaxHeight: urlParams.get('emoteMaxHeight') || '42px',
-        badgeSize: urlParams.get('badgeSize') || '1em',
         fontWeight: urlParams.get('fontWeight') || '800',
-        outlineColor: '#000000',
         outlineSize: urlParams.get('outlineSize') || '4px',
         spacing: urlParams.get('spacing') || '8px',
         fontFamily: urlParams.get('font') || 'sans-serif'
     };
 
-    type Fragment =
-        | { type: 'text'; val: string; mentionColor?: string }
-        | { type: 'emote'; urls: string[] };
     type UIMessage = {
         id: string;
         username: string; // login, нужен для докладки бейджей после resolve
+        userId: string; // из тега IRC — чтобы !refresh не резолвил ID заново через IVR
         user: string;
         color: string;
         // Настоящий твичевский (или дефолтный по хэшу ника) цвет — используется
@@ -124,7 +122,7 @@
             : isRefreshingEmotes
                 ? 'Обновление эмоутов и бейджей…'
                 : 'Загрузка бейджей и эмоутов…';
-    let emoteMap = new Map<string, { url: string; zeroWidth: boolean }>();
+    let emoteMap = new Map<string, SevenTVEmoteEntry>();
     let channelEmoteMap = new Map<string, string>();
     let badgeDictionary: Record<string, string> = {};
     let ffzModBadge: string | undefined;
@@ -192,7 +190,7 @@
             fetchBTTVChannelBots(twitchId).catch(() => [] as string[])
         ]);
         channelEmoteMap = ffzEmotes;
-        emoteMap = stv as Map<string, { url: string; zeroWidth: boolean }>;
+        emoteMap = stv;
         ffzModBadge = ffzBadges.moderatorBadgeUrl;
         ffzVipBadge = ffzBadges.vipBadgeUrl;
         ffzChannelUserBadges = ffzBadges.userBadges;
@@ -206,93 +204,13 @@
     }
 
     /**
-     * Разбирает текст сообщения на фрагменты текст/эмоут.
-     * Порядок приоритета: нативные твич-эмоуты (по индексам из тегов IRC,
-     * это единственно надёжный способ, т.к. текст мог содержать похожие
-     * слова) → 7TV → FFZ. Плюс упоминания (@ник / ник) подсвечиваются
-     * цветом упомянутого, если он уже писал в чат.
-     *
-     * Zero-width 7TV эмоуты (оверлеи вроде рожек/шапок) не создают новый
-     * фрагмент, а докладываются в `urls` последнего эмоут-фрагмента — так
-     * несколько оверлеев подряд корректно стопкой садятся на один и тот же
-     * обычный смайл, а не рисуются рядом как отдельные картинки.
+     * Разбирает текст сообщения на фрагменты текст/эмоут — сама логика
+     * теперь в $lib/services/message-parser.ts (чистая функция без
+     * привязки к DOM/сети, легко тестируется в изоляции), здесь только
+     * прокидываем актуальное состояние компонента.
      */
-    function parseMessage(text: string, twitchEmotes: Record<string, string[]> | undefined): Fragment[] {
-        const nodes: { type: 'emote'; val: string; start: number; end: number }[] = [];
-        if (twitchEmotes) {
-            Object.entries(twitchEmotes).forEach(([id, positions]) => {
-                positions.forEach((range) => {
-                    const [start, end] = range.split('-').map(Number);
-                    nodes.push({
-                        type: 'emote',
-                        val: `https://static-cdn.jtvnw.net/emoticons/v2/${id}/default/dark/3.0`,
-                        start,
-                        end
-                    });
-                });
-            });
-        }
-        nodes.sort((a, b) => a.start - b.start);
-
-        const result: Fragment[] = [];
-        let cur = 0;
-        // Последний СОДЕРЖАТЕЛЬНЫЙ (не пустой пробел) фрагмент — по нему
-        // решаем, стакать ли следующий zero-width эмоут. Раньше смотрели
-        // просто на result[result.length - 1], но между двумя словами-
-        // эмоутами в тексте всегда есть пробел, который тоже кладётся в
-        // result как текстовый фрагмент — и именно НА НЕГО попадала эта
-        // проверка, из-за чего стаканье не срабатывало вообще никогда и
-        // оверлеи всегда рисовались рядом, а не поверх предыдущего смайла.
-        let lastMeaningful: Fragment | null = null;
-
-        const pushEmote = (url: string, zeroWidth: boolean) => {
-            if (zeroWidth && lastMeaningful && lastMeaningful.type === 'emote') {
-                lastMeaningful.urls.push(url);
-                return;
-            }
-            const frag: Fragment = { type: 'emote', urls: [url] };
-            result.push(frag);
-            lastMeaningful = frag;
-        };
-
-        const processText = (str: string) => {
-            str.split(/(\s+)/).forEach((word) => {
-                const clean = word.trim();
-                if (!clean) { if (word) result.push({ type: 'text', val: word }); return; }
-
-                const stv = emoteMap.get(clean);
-                if (stv) { pushEmote(stv.url, stv.zeroWidth); return; }
-
-                const ffz = channelEmoteMap.get(clean);
-                if (ffz) { pushEmote(ffz, false); return; }
-
-                // Упоминание: "@ник" или просто "ник", если это известный по
-                // чату логин (без учёта регистра и хвостовой пунктуации вроде
-                // запятой/двоеточия). Твичевые логины — это [a-zA-Z0-9_].
-                const mentionMatch = /^(@?)([a-zA-Z0-9_]{2,25})([.,!?:;)]*)$/.exec(clean);
-                if (mentionMatch) {
-                    const mentionColor = userColorMap.get(mentionMatch[2].toLowerCase());
-                    if (mentionColor) {
-                        const frag: Fragment = { type: 'text', val: word, mentionColor };
-                        result.push(frag);
-                        lastMeaningful = frag;
-                        return;
-                    }
-                }
-
-                const frag: Fragment = { type: 'text', val: word };
-                result.push(frag);
-                lastMeaningful = frag;
-            });
-        };
-
-        nodes.forEach((n) => {
-            if (n.start > cur) processText(text.substring(cur, n.start));
-            pushEmote(n.val, false);
-            cur = n.end + 1;
-        });
-        if (cur < text.length) processText(text.substring(cur));
-        return result;
+    function parseMessageForChat(text: string, twitchEmotes: Record<string, string[]> | undefined): Fragment[] {
+        return parseMessage(text, twitchEmotes, emoteMap, channelEmoteMap, userColorMap);
     }
 
     function badgeUrlFor(name: string, version: string): string {
@@ -359,14 +277,19 @@
 
         const twitchColor = msg.color || defaultColorForUser(msg.username);
         userColorMap.set(msg.username, twitchColor);
+        // Отдельная переменная, а не вызов прямо внутри литерала ниже —
+        // isChatCurrentlyBusy() мутирует recentMessageTimestamps, и такой
+        // побочный эффект легко потерять из виду среди полей объекта.
+        const skipAnimation = isChatCurrentlyBusy();
 
         const uiMsg: UIMessage = {
             id: msg.id,
             username: msg.username,
+            userId: msg.userId,
             user: msg.displayName,
             color: twitchColor,
             twitchColor,
-            fragments: parseMessage(msg.text, msg.emotes),
+            fragments: parseMessageForChat(msg.text, msg.emotes),
             channelBadgeUrls: [
                 ...(showBadgesTwitch ? msg.badges.map((b) => badgeUrlFor(b.name, b.version)) : []),
                 ...collectFFZChannelBadges(msg)
@@ -374,7 +297,7 @@
             personalBadgeUrls: [],
             isHighlighted: msg.isHighlighted,
             isFirstMessage: msg.isFirstMessage,
-            skipAnimation: isChatCurrentlyBusy()
+            skipAnimation
         };
 
         // Жёсткий потолок — просто страховка на патологический случай (очень
@@ -456,6 +379,11 @@
         messages = messages.filter((m) => m.username.toLowerCase() !== username.toLowerCase());
     }
 
+    /** CLEARMSG — модератор удалил одно конкретное сообщение по id (не таймаут/бан всего пользователя). */
+    export function clearMessage(id: string) {
+        messages = messages.filter((m) => m.id !== id);
+    }
+
     export function clearAllMessages() {
         messages = [];
     }
@@ -524,74 +452,14 @@
 
     /** Несколько демо-сообщений для превью настроек — см. `previewMode` выше. */
     function loadPreviewMessages() {
-        // Простые SVG-плейсхолдеры для 7TV/FFZ — не тянем их с реального CDN
-        // (в previewMode принципиально нет сети), но по размеру/масштабу
-        // на экране они ведут себя абсолютно так же, как настоящие эмоуты,
-        // т.к. рендерятся тем же <img class="emote">.
-        const svg = (bg: string, label: string) =>
-            'data:image/svg+xml;utf8,' + encodeURIComponent(
-                `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28">` +
-                `<rect width="28" height="28" rx="6" fill="${bg}"/>` +
-                `<text x="14" y="19" font-size="11" font-family="sans-serif" fill="white" text-anchor="middle">${label}</text></svg>`
-            );
+        const { emoteMap: previewEmotes, channelEmoteMap: previewFfzEmotes } = buildPreviewEmoteMaps();
+        emoteMap = previewEmotes;
+        channelEmoteMap = previewFfzEmotes;
 
-        emoteMap.set('StvSample', { url: svg('#5b21b6', '7TV'), zeroWidth: false });
-        emoteMap.set('StvOverlay', { url: svg('#facc15', '✦'), zeroWidth: true });
-        channelEmoteMap.set('FfzSample', svg('#00b6f0', 'FFZ'));
-
-        const text1 = 'Добро пожаловать на стрим! Погнали Kappa';
-        const kappaStart = text1.indexOf('Kappa');
-
-        const demo: ChatMessage[] = [
-            {
-                id: 'preview-1', channel: '', username: 'zonlex', userId: '1',
-                displayName: 'Zonlex', color: '#00ff7f',
-                badges: [{ name: 'broadcaster', version: '1' }], badgeInfo: [],
-                emotes: kappaStart >= 0 ? { '25': [`${kappaStart}-${kappaStart + 4}`] } : {},
-                isMod: false, isVip: false, isBroadcaster: true, isSubscriber: false, isAction: false,
-                isHighlighted: false, isFirstMessage: false,
-                text: text1, raw: ''
-            },
-            {
-                id: 'preview-2', channel: '', username: 'bicme', userId: '2',
-                displayName: 'bicme', color: '#9146ff',
-                badges: [{ name: 'subscriber', version: '12' }], badgeInfo: [], emotes: {},
-                isMod: false, isVip: false, isBroadcaster: false, isSubscriber: true, isAction: false,
-                isHighlighted: false, isFirstMessage: true,
-                text: 'Первый раз тут, красиво оформлено!', raw: ''
-            },
-            {
-                id: 'preview-3', channel: '', username: 'moderatorsam', userId: '3',
-                displayName: 'ModeratorSam', color: '',
-                badges: [{ name: 'moderator', version: '1' }], badgeInfo: [], emotes: {},
-                isMod: true, isVip: false, isBroadcaster: false, isSubscriber: false, isAction: false,
-                isHighlighted: false, isFirstMessage: false,
-                text: '@Zonlex спасибо за стрим, было круто!', raw: ''
-            },
-            {
-                id: 'preview-4', channel: '', username: 'donor228', userId: '4',
-                displayName: 'donor228', color: '#ff69b4',
-                badges: [], badgeInfo: [], emotes: {},
-                isMod: false, isVip: false, isBroadcaster: false, isSubscriber: false, isAction: false,
-                isHighlighted: true, isFirstMessage: false,
-                text: 'Задонатил, чтобы это увидели все!', raw: ''
-            },
-            {
-                id: 'preview-5', channel: '', username: 'stvfan', userId: '5',
-                displayName: 'stvfan', color: '#3b82f6',
-                badges: [], badgeInfo: [], emotes: {},
-                isMod: false, isVip: false, isBroadcaster: false, isSubscriber: false, isAction: false,
-                isHighlighted: false, isFirstMessage: false,
-                // Демонстрация: FfzSample — обычный смайл, StvSample —
-                // обычный смайл, StvOverlay — zero-width, должен сесть
-                // ПОВЕРХ предыдущего (StvSample), а не рядом с ним.
-                text: 'вот так теперь выглядят оверлеи FfzSample StvSample StvOverlay', raw: ''
-            }
-        ];
         let i = 0;
         const feed = () => {
-            if (i >= demo.length) return;
-            addMessage(demo[i]);
+            if (i >= PREVIEW_MESSAGES.length) return;
+            addMessage(PREVIEW_MESSAGES[i]);
             i++;
             setTimeout(feed, 500);
         };
@@ -656,7 +524,7 @@
                 // Снимок ID сообщений на момент вызова — если за время
                 // запросов список успел обновиться, лишнее просто отфильтруется
                 // проверкой m.id !== msgId внутри enrichWithPersonalCosmetics.
-                messages.forEach((m) => void enrichWithPersonalCosmetics(m.username, '', m.id));
+                messages.forEach((m) => void enrichWithPersonalCosmetics(m.username, m.userId, m.id));
             }
         } finally {
             isRefreshingEmotes = false;
@@ -692,7 +560,6 @@
       --chat-fs: {chatConfig.fontSize};
       --chat-es: {chatConfig.emoteMaxHeight};
       --chat-fw: {chatConfig.fontWeight};
-      --chat-oc: {chatConfig.outlineColor};
       --chat-os: {chatConfig.outlineSize};
       --chat-sp: {chatConfig.spacing};
       --chat-font: '{chatConfig.fontFamily}';
@@ -774,8 +641,8 @@
     }
 
     .message-row.first-time {
-        background: rgba(78, 30, 80, 0.45);
-        border-left: 4px solid #4e1e50;
+        background: rgba(160, 41, 160, 0.4);
+        border-left: 4px solid #ff75e6 !important;
     }
 
     /* При активном чате (см. isChatCurrentlyBusy в скрипте) новые сообщения

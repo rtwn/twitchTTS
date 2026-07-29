@@ -56,8 +56,11 @@ export async function GET({ url }) {
     try {
         const [gB, cB] = await Promise.all([
             fetch('https://api.twitch.tv/helix/chat/badges/global', { headers }),
-            fetch(`https://api.twitch.tv/helix/chat/badges?broadcaster_id=${broadcasterId}`, { headers })
+            fetch(`https://api.twitch.tv/helix/chat/badges?broadcaster_id=${encodeURIComponent(broadcasterId)}`, { headers })
         ]);
+        if (!gB.ok || !cB.ok) {
+            console.error(`[Badges] Helix вернул ошибку: global=${gB.status}, channel=${cB.status}`);
+        }
         const gData = await gB.json();
         const cData = await cB.json();
 
