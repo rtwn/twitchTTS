@@ -13,6 +13,18 @@ export interface TwitchBadge {
     version: string;
 }
 
+// Twitch добавил GIF-сообщения в коллабе с Giphy (тег `gifs` в PRIVMSG,
+// задокументирован Twitch 17 июля 2026) — раньше без поддержки этого тега
+// такое сообщение выглядело как обычный текст вида "[Sesame Street GIF by
+// Respective]" (человекочитаемое описание, которое Twitch подставляет как
+// текст сообщения для клиентов, не умеющих в GIF).
+export interface GifInfo {
+    start: number;
+    end: number;
+    gifId: string;
+    gifUrl: string; // отдаётся уже готовой ссылкой — использовать как есть, не модифицировать
+}
+
 export interface ChatMessage {
     id: string;
     channel: string;
@@ -23,6 +35,7 @@ export interface ChatMessage {
     badges: TwitchBadge[];
     badgeInfo: TwitchBadge[]; // например subscriber:N (число месяцев)
     emotes: Record<string, string[]>; // emoteId -> ['start-end', ...]
+    gifs: GifInfo[];
     isMod: boolean;
     isVip: boolean;
     isBroadcaster: boolean;
@@ -139,6 +152,18 @@ function parseEmotes(raw: string | undefined): Record<string, string[]> {
         result[id] = ranges.split(',');
     });
     return result;
+}
+
+// Формат тега: "<start>-<end>|<gifID>|<gifURL>" через запятую, если гифок
+// несколько в одном сообщении. Twitch прямо указывает: ссылку из тега нужно
+// использовать как есть, без модификации — так и делаем, никаких своих CDN-путей.
+function parseGifs(raw: string | undefined): GifInfo[] {
+    if (!raw) return [];
+    return raw.split(',').filter(Boolean).map((entry) => {
+        const [range, gifId, gifUrl] = entry.split('|');
+        const [start, end] = (range || '').split('-').map(Number);
+        return { start, end, gifId: gifId || '', gifUrl: gifUrl || '' };
+    }).filter((g) => g.gifUrl && Number.isFinite(g.start) && Number.isFinite(g.end));
 }
 
 type MessageHandler = (msg: ChatMessage) => void;
@@ -296,6 +321,7 @@ export class TwitchIRC {
             badges,
             badgeInfo: parseBadgeList(t['badge-info']),
             emotes: parseEmotes(t['emotes']),
+            gifs: parseGifs(t['gifs']),
             isMod,
             isVip,
             isBroadcaster,

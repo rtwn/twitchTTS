@@ -47,6 +47,12 @@
     const showStvColors = urlParams.get('showStvColors') !== 'false';
     const showHighlighted = urlParams.get('showHighlighted') !== 'false';
     const showFirstTimeChatter = urlParams.get('showFirstTimeChatter') !== 'false';
+    // GIF-сообщения (Twitch × Giphy). Выключено — просто не подставляем
+    // картинку, текст сообщения при этом останется человекочитаемым
+    // фолбэком вида "[Sesame Street GIF by Respective]" — это ровно то же
+    // самое поведение, которое сам Twitch показывает клиентам без
+    // поддержки GIF, так что выключение тут ничего не ломает.
+    const showGifs = urlParams.get('showGifs') !== 'false';
 
     // Скрытие команд (!tts, !skip и т.п.) из ВИЗУАЛЬНОГО чата — сама
     // обработка команд для TTS живёт отдельно в widget/+page.svelte и тут
@@ -209,8 +215,8 @@
      * привязки к DOM/сети, легко тестируется в изоляции), здесь только
      * прокидываем актуальное состояние компонента.
      */
-    function parseMessageForChat(text: string, twitchEmotes: Record<string, string[]> | undefined): Fragment[] {
-        return parseMessage(text, twitchEmotes, emoteMap, channelEmoteMap, userColorMap);
+    function parseMessageForChat(text: string, twitchEmotes: Record<string, string[]> | undefined, gifs: import('$lib/services/twitch-irc').GifInfo[] | undefined): Fragment[] {
+        return parseMessage(text, twitchEmotes, showGifs ? gifs : undefined, emoteMap, channelEmoteMap, userColorMap);
     }
 
     function badgeUrlFor(name: string, version: string): string {
@@ -289,7 +295,7 @@
             user: msg.displayName,
             color: twitchColor,
             twitchColor,
-            fragments: parseMessageForChat(msg.text, msg.emotes),
+            fragments: parseMessageForChat(msg.text, msg.emotes, msg.gifs),
             channelBadgeUrls: [
                 ...(showBadgesTwitch ? msg.badges.map((b) => badgeUrlFor(b.name, b.version)) : []),
                 ...collectFFZChannelBadges(msg)
@@ -599,6 +605,8 @@
                         {:else}
                             <span class="chat-text">{f.val}</span>
                         {/if}
+                    {:else if f.type === 'gif'}
+                        <img src={f.url} class="chat-gif" on:error={handleImageError} loading="lazy" alt="GIF" />
                     {:else if f.urls.length > 1}
                         <span class="emote-stack">
                             {#each f.urls as url}
@@ -768,6 +776,25 @@
         justify-self: center;
         align-self: center;
         margin: 0;
+    }
+
+    /*
+     * GIF-сообщения (Twitch + Giphy, тег `gifs` в PRIVMSG) заметно крупнее
+     * обычного смайла — это отдельный вид контента ("стикер"), а не мелкая
+     * инлайновая иконка вплетённая в текст. display:block переносит его на
+     * свою строку — GIF-сообщение и так всегда занимает собой всё сообщение
+     * целиком (сам текст — это просто человекочитаемый фолбэк вида "[Sesame
+     * Street GIF by Respective]" для старых клиентов, не показываем его,
+     * т.к. вместо него теперь есть настоящая картинка).
+     */
+    .chat-gif {
+        display: inline-block;
+        max-height: clamp(120px, calc(var(--chat-es) * 2.5), 220px);
+        width: auto;
+        margin: 4px 0;
+        align-self: flex-end;
+        border-radius: 6px;
+        filter: drop-shadow(1px 1px 3px rgba(0,0,0,0.6));
     }
 
     @keyframes slideIn {

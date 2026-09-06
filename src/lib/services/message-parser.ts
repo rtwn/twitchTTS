@@ -7,9 +7,12 @@
  * что затрудняло чтение и тестирование именно этой части.
  */
 
+import type { GifInfo } from './twitch-irc';
+
 export type Fragment =
     | { type: 'text'; val: string; mentionColor?: string }
-    | { type: 'emote'; urls: string[] };
+    | { type: 'emote'; urls: string[] }
+    | { type: 'gif'; url: string };
 
 export interface SevenTVEmoteEntry {
     url: string;
@@ -17,8 +20,8 @@ export interface SevenTVEmoteEntry {
 }
 
 /**
- * Порядок приоритета: нативные твич-эмоуты (по индексам из тегов IRC, это
- * единственно надёжный способ, т.к. текст мог содержать похожие слова) →
+ * Порядок приоритета: нативные твич-эмоуты и GIF (по индексам из тегов IRC,
+ * это единственно надёжный способ, т.к. текст мог содержать похожие слова) →
  * 7TV → FFZ. Плюс упоминания (@ник / ник) подсвечиваются цветом
  * упомянутого, если он уже писал в чат.
  *
@@ -35,22 +38,30 @@ export interface SevenTVEmoteEntry {
 export function parseMessage(
     text: string,
     twitchEmotes: Record<string, string[]> | undefined,
+    gifs: GifInfo[] | undefined,
     emoteMap: Map<string, SevenTVEmoteEntry>,
     channelEmoteMap: Map<string, string>,
     userColorMap: Map<string, string>
 ): Fragment[] {
-    const nodes: { type: 'emote'; val: string; start: number; end: number }[] = [];
+    const nodes: { kind: 'emote' | 'gif'; val: string; start: number; end: number }[] = [];
     if (twitchEmotes) {
         Object.entries(twitchEmotes).forEach(([id, positions]) => {
             positions.forEach((range) => {
                 const [start, end] = range.split('-').map(Number);
                 nodes.push({
-                    type: 'emote',
+                    kind: 'emote',
                     val: `https://static-cdn.jtvnw.net/emoticons/v2/${id}/default/dark/3.0`,
                     start,
                     end
                 });
             });
+        });
+    }
+    // GIF-ссылку Twitch отдаёт уже готовой (см. GifInfo.gifUrl) — используем
+    // её как есть, ничего своего не достраиваем.
+    if (gifs) {
+        gifs.forEach((g) => {
+            nodes.push({ kind: 'gif', val: g.gifUrl, start: g.start, end: g.end });
         });
     }
     nodes.sort((a, b) => a.start - b.start);
@@ -65,6 +76,12 @@ export function parseMessage(
             return;
         }
         const frag: Fragment = { type: 'emote', urls: [url] };
+        result.push(frag);
+        lastMeaningful = frag;
+    };
+
+    const pushGif = (url: string) => {
+        const frag: Fragment = { type: 'gif', url };
         result.push(frag);
         lastMeaningful = frag;
     };
@@ -102,7 +119,8 @@ export function parseMessage(
 
     nodes.forEach((n) => {
         if (n.start > cur) processText(text.substring(cur, n.start));
-        pushEmote(n.val, false);
+        if (n.kind === 'gif') pushGif(n.val);
+        else pushEmote(n.val, false);
         cur = n.end + 1;
     });
     if (cur < text.length) processText(text.substring(cur));

@@ -43,6 +43,7 @@ export const PREVIEW_MESSAGES: ChatMessage[] = [
         displayName: 'Zonlex', color: '#00ff7f',
         badges: [{ name: 'broadcaster', version: '1' }], badgeInfo: [],
         emotes: kappaStart >= 0 ? { '25': [`${kappaStart}-${kappaStart + 4}`] } : {},
+        gifs: [],
         isMod: false, isVip: false, isBroadcaster: true, isSubscriber: false, isAction: false,
         isHighlighted: false, isFirstMessage: false,
         text: WELCOME_TEXT, raw: ''
@@ -51,35 +52,52 @@ export const PREVIEW_MESSAGES: ChatMessage[] = [
         id: 'preview-2', channel: '', username: 'bicme', userId: '2',
         displayName: 'bicme', color: '#9146ff',
         badges: [{ name: 'subscriber', version: '12' }], badgeInfo: [], emotes: {},
+        gifs: [],
         isMod: false, isVip: false, isBroadcaster: false, isSubscriber: true, isAction: false,
         isHighlighted: false, isFirstMessage: true,
-        text: 'Первый раз тут, красиво оформлено!', raw: ''
+        text: 'Мой друг ударил меня трубой из ПВХ, и это заставило меня осознать, что я гей.', raw: ''
     },
     {
         id: 'preview-3', channel: '', username: 'moderatorsam', userId: '3',
         displayName: 'ModeratorSam', color: '',
         badges: [{ name: 'moderator', version: '1' }], badgeInfo: [], emotes: {},
+        gifs: [],
         isMod: true, isVip: false, isBroadcaster: false, isSubscriber: false, isAction: false,
         isHighlighted: false, isFirstMessage: false,
-        text: '@Zonlex спасибо за стрим, было круто!', raw: ''
+        text: 'почувствовали уже мои 14см?)', raw: ''
     },
     {
         id: 'preview-4', channel: '', username: 'donor228', userId: '4',
         displayName: 'donor228', color: '#ff69b4',
         badges: [], badgeInfo: [], emotes: {},
+        gifs: [],
         isMod: false, isVip: false, isBroadcaster: false, isSubscriber: false, isAction: false,
         isHighlighted: true, isFirstMessage: false,
-        text: 'Задонатил, чтобы это увидели все!', raw: ''
+        text: 'человек паук умрет', raw: ''
     },
     {
         id: 'preview-5', channel: '', username: 'stvfan', userId: '5',
         displayName: 'stvfan', color: '#3b82f6',
         badges: [], badgeInfo: [], emotes: {},
+        gifs: [],
         isMod: false, isVip: false, isBroadcaster: false, isSubscriber: false, isAction: false,
         isHighlighted: false, isFirstMessage: false,
         // Демонстрация: FfzSample — обычный смайл, StvSample — обычный
         // смайл, StvOverlay — zero-width, должен сесть ПОВЕРХ предыдущего
         // (StvSample), а не рядом с ним.
         text: 'вот так теперь выглядят оверлеи FfzSample StvSample StvOverlay', raw: ''
+    },
+    {
+        id: 'preview-6', channel: '', username: 'gifsender', userId: '6',
+        displayName: 'gifsender', color: '#f97316',
+        badges: [], badgeInfo: [], emotes: {},
+        // Реальный формат тега Twitch: диапазон покрывает ВЕСЬ фолбэк-текст
+        // (человекочитаемое описание для клиентов без поддержки GIF) —
+        // именно поэтому после рендера самой картинки от исходного текста
+        // ничего не остаётся, см. parseMessage в message-parser.ts.
+        gifs: [{ start: 0, end: 33, gifId: 'preview', gifUrl: placeholderEmoteSvg('#facc15', 'GIF') }],
+        isMod: false, isVip: false, isBroadcaster: false, isSubscriber: false, isAction: false,
+        isHighlighted: false, isFirstMessage: false,
+        text: '[Sesame Street GIF by Respective]', raw: ''
     }
 ];
