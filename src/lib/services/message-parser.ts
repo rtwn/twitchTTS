@@ -11,12 +11,42 @@ import type { GifInfo } from './twitch-irc';
 
 export type Fragment =
     | { type: 'text'; val: string; mentionColor?: string }
-    | { type: 'emote'; urls: string[] }
+    | { type: 'emote'; urls: string[]; bttvTransform?: string; bttvCursed?: boolean }
     | { type: 'gif'; url: string };
 
 export interface SevenTVEmoteEntry {
     url: string;
     zeroWidth: boolean;
+}
+
+// BetterTTV Global Effects — текстовые префиксы перед кодом эмоута
+// (обязательно с пробелом после, напр. "w! Kappa"). Полный список подтверждён
+// напрямую по исходникам BetterTTV (src/modules/chat/index.js): w! — wide,
+// h!/v! — flip по горизонтали/вертикали, z! — zero-space, c! — cursed,
+// l!/r! — rotate left/right. У реального BTTV есть ещё p!/s! (party/shake) —
+// не добавлены сознательно, т.к. это уже полноценные анимации, а не просто
+// transform/filter, и без референса того, как именно они выглядят у BTTV,
+// легко реализовать неверно.
+type BttvMod = 'wide' | 'flipH' | 'flipV' | 'zeroSpace' | 'cursed' | 'rotateLeft' | 'rotateRight';
+
+const BTTV_MODIFIERS: Record<string, BttvMod> = {
+    'w!': 'wide',
+    'h!': 'flipH',
+    'v!': 'flipV',
+    'z!': 'zeroSpace',
+    'c!': 'cursed',
+    'l!': 'rotateLeft',
+    'r!': 'rotateRight'
+};
+
+function bttvTransformFor(mods: Set<BttvMod>): string | undefined {
+    const parts: string[] = [];
+    const scaleX = (mods.has('wide') ? 1.6 : 1) * (mods.has('flipH') ? -1 : 1);
+    const scaleY = mods.has('flipV') ? -1 : 1;
+    if (scaleX !== 1 || scaleY !== 1) parts.push(`scale(${scaleX}, ${scaleY})`);
+    if (mods.has('rotateLeft')) parts.push('rotate(-20deg)');
+    if (mods.has('rotateRight')) parts.push('rotate(20deg)');
+    return parts.length ? parts.join(' ') : undefined;
 }
 
 /**
@@ -70,12 +100,21 @@ export function parseMessage(
     let cur = 0;
     let lastMeaningful: Fragment | null = null;
 
-    const pushEmote = (url: string, zeroWidth: boolean) => {
+    const pushEmote = (url: string, zeroWidth: boolean, mods?: Set<BttvMod>) => {
+        const transform = mods ? bttvTransformFor(mods) : undefined;
+        const cursed = mods?.has('cursed') || undefined;
+
         if (zeroWidth && lastMeaningful && lastMeaningful.type === 'emote') {
             lastMeaningful.urls.push(url);
+            // Модификаторы применяются к последнему добавленному слою стопки —
+            // это осознанное упрощение: BTTV/7TV нигде не документируют, как
+            // должна вести себя стопка модификатор+zero-width+обычный эмоут
+            // одновременно, случай достаточно редкий, чтобы не переусложнять.
+            if (transform) lastMeaningful.bttvTransform = transform;
+            if (cursed) lastMeaningful.bttvCursed = cursed;
             return;
         }
-        const frag: Fragment = { type: 'emote', urls: [url] };
+        const frag: Fragment = { type: 'emote', urls: [url], bttvTransform: transform, bttvCursed: cursed };
         result.push(frag);
         lastMeaningful = frag;
     };
@@ -87,15 +126,56 @@ export function parseMessage(
     };
 
     const processText = (str: string) => {
+        // BetterTTV Global Effects — "w! Kappa" и т.п. Модификатор идёт
+        // ОТДЕЛЬНЫМ словом перед эмоутом (с пробелом между ними, это
+        // обязательное условие самого BTTV). Копим их, пока не увидим
+        // следующее содержательное слово: если это известный эмоут —
+        // применяем накопленные модификаторы к нему; если нет — значит
+        // это был не модификатор, а обычный текст (например кто-то
+        // реально написал "w! и что дальше" не имея в виду никакой
+        // эмоут) — тогда возвращаем накопленные токены обратно как
+        // обычные текстовые фрагменты.
+        let pendingMods = new Set<BttvMod>();
+        let pendingWords: string[] = [];
+
+        const flushPendingAsText = () => {
+            pendingWords.forEach((w) => {
+                const frag: Fragment = { type: 'text', val: w };
+                result.push(frag);
+                lastMeaningful = frag;
+            });
+            pendingMods = new Set();
+            pendingWords = [];
+        };
+
         str.split(/(\s+)/).forEach((word) => {
             const clean = word.trim();
             if (!clean) { if (word) result.push({ type: 'text', val: word }); return; }
 
+            const mod = BTTV_MODIFIERS[clean.toLowerCase()];
+            if (mod) {
+                pendingMods.add(mod);
+                pendingWords.push(word);
+                return;
+            }
+
             const stv = emoteMap.get(clean);
-            if (stv) { pushEmote(stv.url, stv.zeroWidth); return; }
+            if (stv) {
+                pushEmote(stv.url, stv.zeroWidth || pendingMods.has('zeroSpace'), pendingMods);
+                pendingMods = new Set(); pendingWords = [];
+                return;
+            }
 
             const ffz = channelEmoteMap.get(clean);
-            if (ffz) { pushEmote(ffz, false); return; }
+            if (ffz) {
+                pushEmote(ffz, pendingMods.has('zeroSpace'), pendingMods);
+                pendingMods = new Set(); pendingWords = [];
+                return;
+            }
+
+            // Дальше — не эмоут, значит накопленные токены модификаторов (если
+            // были) на самом деле просто текст, возвращаем их как есть.
+            if (pendingWords.length > 0) flushPendingAsText();
 
             // Упоминание: "@ник" или просто "ник", если это известный по
             // чату логин (без учёта регистра и хвостовой пунктуации вроде
@@ -115,6 +195,10 @@ export function parseMessage(
             result.push(frag);
             lastMeaningful = frag;
         });
+
+        // Модификатор мог оказаться последним словом в куске текста без
+        // эмоута после — тоже возвращаем его как обычный текст.
+        if (pendingWords.length > 0) flushPendingAsText();
     };
 
     nodes.forEach((n) => {

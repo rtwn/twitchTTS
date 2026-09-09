@@ -105,16 +105,66 @@ export function resolveTwitchUser(login: string): Promise<TwitchUserInfo | null>
  * настраивал, список будет пустым — это не наша недоработка, а честное
  * отражение того, что БТTV не знает о ботах в этом канале.
  */
-export async function fetchBTTVChannelBots(twitchId: string): Promise<string[]> {
+export interface BTTVChannelData {
+    bots: string[];
+    emotes: Map<string, string>; // code -> url
+}
+
+/**
+ * Тот же самый эндпоинт (/3/cached/users/twitch/{id}), что раньше отдавал
+ * только список ботов — оказалось, он же отдаёт `channelEmotes` и
+ * `sharedEmotes` (эмоуты, которые стример добавил себе с чужих каналов).
+ * Раньше это просто игнорировалось, хотя запрос уже уходил.
+ */
+export async function fetchBTTVChannelData(twitchId: string): Promise<BTTVChannelData> {
     try {
         const res = await fetch(`https://api.betterttv.net/3/cached/users/twitch/${twitchId}`);
-        if (!res.ok) return [];
+        if (!res.ok) return { bots: [], emotes: new Map() };
         const data = await res.json();
-        return (data.bots || []).map((b: string) => b.toLowerCase());
+
+        const emotes = new Map<string, string>();
+        [...(data.channelEmotes || []), ...(data.sharedEmotes || [])].forEach((e: any) => {
+            if (e?.code && e?.id) emotes.set(e.code, `https://cdn.betterttv.net/emote/${e.id}/2x`);
+        });
+
+        return { bots: (data.bots || []).map((b: string) => b.toLowerCase()), emotes };
     } catch (e) {
-        console.error('[BTTV] Не удалось загрузить список ботов канала:', e);
-        return [];
+        console.error('[BTTV] Не удалось загрузить данные канала:', e);
+        return { bots: [], emotes: new Map() };
     }
+}
+
+const BTTV_GLOBAL_CACHE_KEY = 'twitchtts_bttv_global_v1';
+let bttvGlobalPromise: Promise<Map<string, string>> | null = null;
+
+/**
+ * Глобальные эмоуты BTTV — общий на весь сайт список, меняется редко,
+ * поэтому тот же паттерн, что и каталог пейнтов 7TV / словарь бейджей FFZ:
+ * localStorage-кэш вместо запроса на каждой перезагрузке.
+ */
+export function getBTTVGlobalEmotes(): Promise<Map<string, string>> {
+    if (!bttvGlobalPromise) {
+        bttvGlobalPromise = (async () => {
+            const cached = readLocalCache<[string, string][]>(BTTV_GLOBAL_CACHE_KEY);
+            if (cached) return new Map(cached);
+
+            const map = new Map<string, string>();
+            try {
+                const res = await fetch('https://api.betterttv.net/3/cached/emotes/global');
+                if (res.ok) {
+                    const data = await res.json();
+                    (data || []).forEach((e: any) => {
+                        if (e?.code && e?.id) map.set(e.code, `https://cdn.betterttv.net/emote/${e.id}/2x`);
+                    });
+                    writeLocalCache(BTTV_GLOBAL_CACHE_KEY, Array.from(map.entries()));
+                }
+            } catch (e) {
+                console.error('[BTTV] Ошибка загрузки глобальных эмоутов:', e);
+            }
+            return map;
+        })();
+    }
+    return bttvGlobalPromise;
 }
 
 export async function fetch7TVEmotesByTwitchId(twitchId: string) {

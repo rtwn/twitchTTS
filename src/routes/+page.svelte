@@ -76,6 +76,7 @@
             url.searchParams.set('showHighlighted', config.showHighlighted.toString());
             url.searchParams.set('showFirstTimeChatter', config.showFirstTimeChatter.toString());
             url.searchParams.set('showGifs', config.showGifs.toString());
+            url.searchParams.set('showBttvEffects', config.showBttvEffects.toString());
 
             url.searchParams.set('hideCommands', config.hideCommands.toString());
             if (config.commandPrefixes.trim()) url.searchParams.set('commandPrefixes', config.commandPrefixes);
@@ -131,6 +132,7 @@
         showHighlighted: true,
         showFirstTimeChatter: true,
         showGifs: true,
+        showBttvEffects: true,
         hideCommands: true,
         commandPrefixes: "!,#,=,-",
         hideBots: true
@@ -371,6 +373,7 @@
                 <div class="switch-row"><span>Highlight "Highlighted Messages"</span><label class="switch"><input type="checkbox" bind:checked={config.showHighlighted} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Highlight first-time chatters</span><label class="switch"><input type="checkbox" bind:checked={config.showFirstTimeChatter} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Show GIF messages</span><label class="switch"><input type="checkbox" bind:checked={config.showGifs} /><span class="slider"></span></label></div>
+                <div class="switch-row"><span>Show BTTV effects (w!/h!/v!/z!/c!/l!/r!)</span><label class="switch"><input type="checkbox" bind:checked={config.showBttvEffects} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Hide bots (auto-detected via Twitch/FFZ/BTTV)</span><label class="switch"><input type="checkbox" bind:checked={config.hideBots} /><span class="slider"></span></label></div>
                 <div class="switch-row"><span>Hide commands (!, #, =, - ...)</span><label class="switch"><input type="checkbox" bind:checked={config.hideCommands} /><span class="slider"></span></label></div>
                 {#if config.hideCommands}

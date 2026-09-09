@@ -6,7 +6,8 @@
         fetchFFZEmotes,
         fetchFFZBadges,
         fetchFFZPersonalBadges,
-        fetchBTTVChannelBots,
+        fetchBTTVChannelData,
+        getBTTVGlobalEmotes,
         fetchHomiesBadge,
         preloadSevenTVPaintCatalog,
         resolveTwitchUser,
@@ -53,6 +54,12 @@
     // самое поведение, которое сам Twitch показывает клиентам без
     // поддержки GIF, так что выключение тут ничего не ломает.
     const showGifs = urlParams.get('showGifs') !== 'false';
+    // BetterTTV Global Effects (w!/h!/v!/z!/c!/l!/r!). Выключено — сами
+    // эмоуты всё равно отрисуются как обычно, просто без transform/cursed-
+    // эффекта, а слова-модификаторы (если рядом с эмоутом их не было)
+    // и так уже показываются как обычный текст, тут ничего дополнительно
+    // ломать не нужно.
+    const showBttvEffects = urlParams.get('showBttvEffects') !== 'false';
 
     // Скрытие команд (!tts, !skip и т.п.) из ВИЗУАЛЬНОГО чата — сама
     // обработка команд для TTS живёт отдельно в widget/+page.svelte и тут
@@ -189,13 +196,18 @@
     }
 
     async function loadChannelExtras(twitchId: string, login: string) {
-        const [ffzEmotes, stv, ffzBadges, bttvBots] = await Promise.all([
+        const [ffzEmotes, stv, ffzBadges, bttvChannel, bttvGlobal] = await Promise.all([
             fetchFFZEmotes(login).catch(() => new Map<string, string>()),
             fetch7TVEmotesByTwitchId(twitchId).catch(() => new Map()),
             fetchFFZBadges(login).catch(() => ({ userBadges: new Map(), botUsers: new Set() } as import('$lib/services/twitch-api').FFZBadges)),
-            fetchBTTVChannelBots(twitchId).catch(() => [] as string[])
+            fetchBTTVChannelData(twitchId).catch(() => ({ bots: [], emotes: new Map() } as import('$lib/services/twitch-api').BTTVChannelData)),
+            getBTTVGlobalEmotes().catch(() => new Map<string, string>())
         ]);
-        channelEmoteMap = ffzEmotes;
+        // Порядок слияния = приоритет при совпадении кода эмоута: сначала
+        // самые общие (глобальные BTTV), потом FFZ канала, последними —
+        // канальные/shared BTTV (самые специфичные для стримера) — они
+        // и должны выигрывать при совпадении кода.
+        channelEmoteMap = new Map([...bttvGlobal, ...ffzEmotes, ...bttvChannel.emotes]);
         emoteMap = stv;
         ffzModBadge = ffzBadges.moderatorBadgeUrl;
         ffzVipBadge = ffzBadges.vipBadgeUrl;
@@ -206,7 +218,7 @@
         // bots) и официальный Twitch Chat Bot badge (проверяется прямо в
         // addMessage по тегу badges — тем ботам, что уже перешли на новый
         // Send Chat Message API, отдельный запрос не нужен).
-        channelBots = new Set([...bttvBots, ...ffzBadges.botUsers]);
+        channelBots = new Set([...bttvChannel.bots, ...ffzBadges.botUsers]);
     }
 
     /**
@@ -608,13 +620,21 @@
                     {:else if f.type === 'gif'}
                         <img src={f.url} class="chat-gif" on:error={handleImageError} loading="lazy" alt="GIF" />
                     {:else if f.urls.length > 1}
-                        <span class="emote-stack">
+                        <span class="emote-stack" class:bttv-cursed={showBttvEffects && f.bttvCursed} style={showBttvEffects && f.bttvTransform ? `--bttv-transform: ${f.bttvTransform}` : ''}>
                             {#each f.urls as url}
                                 <img src={url} class="emote" on:error={handleImageError} loading="lazy" alt="" />
                             {/each}
                         </span>
                     {:else}
-                        <img src={f.urls[0]} class="emote" on:error={handleImageError} loading="lazy" alt="" />
+                        <img
+                            src={f.urls[0]}
+                            class="emote"
+                            class:bttv-cursed={showBttvEffects && f.bttvCursed}
+                            style={showBttvEffects && f.bttvTransform ? `--bttv-transform: ${f.bttvTransform}` : ''}
+                            on:error={handleImageError}
+                            loading="lazy"
+                            alt=""
+                        />
                     {/if}
                 {/each}
             </div>
@@ -779,6 +799,35 @@
     }
 
     /*
+     * --bttv-transform выставляется инлайново из template (wide/flip/rotate),
+     * а .emote/.emote-stack всегда её подхватывают через var(...) — так
+     * cursed-анимация ниже может ДОБАВить к ней свой skew, а не перебить
+     * инлайновый transform целиком (если бы cursed-keyframes напрямую
+     * задавали transform без var(), это стёрло бы, скажем, wide при
+     * сочетании "c! w! Kappa").
+     */
+    .emote, .emote-stack {
+        transform: var(--bttv-transform, none);
+    }
+
+    /*
+     * BetterTTV "c!" (cursed) — сам BTTV нигде не публикует точный CSS для
+     * своих модификаторов (см. обсуждение "Emote Modifier Documentation and
+     * Prerendering" в их репозитории), поэтому это осознанная стилизация
+     * "под искажение", а не попытка побайтово повторить оригинал: лёгкий
+     * перекос + сдвиг оттенка + мелкое дрожание.
+     */
+    .bttv-cursed {
+        filter: contrast(1.3) hue-rotate(15deg) saturate(1.4);
+        animation: bttvCursedJitter 0.4s infinite alternate ease-in-out;
+    }
+
+    @keyframes bttvCursedJitter {
+        from { transform: var(--bttv-transform, none) skewX(-6deg) translateY(0); }
+        to { transform: var(--bttv-transform, none) skewX(6deg) translateY(-2px); }
+    }
+
+    /*
      * GIF-сообщения (Twitch + Giphy, тег `gifs` в PRIVMSG) заметно крупнее
      * обычного смайла — это отдельный вид контента ("стикер"), а не мелкая
      * инлайновая иконка вплетённая в текст. display:block переносит его на
@@ -788,7 +837,7 @@
      * т.к. вместо него теперь есть настоящая картинка).
      */
     .chat-gif {
-        display: inline-block;
+        display: block;
         max-height: clamp(120px, calc(var(--chat-es) * 2.5), 220px);
         width: auto;
         margin: 4px 0;
