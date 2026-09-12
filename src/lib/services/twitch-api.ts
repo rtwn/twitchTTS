@@ -167,6 +167,77 @@ export function getBTTVGlobalEmotes(): Promise<Map<string, string>> {
     return bttvGlobalPromise;
 }
 
+/**
+ * FFZ Emote Effects (ffzRainbow, ffzSpin, ffzCursed и т.п.) — это не
+ * отдельная функция чата, а специальные ЭМОУТЫ внутри глобального набора
+ * FFZ (`/v1/set/global`), у которых есть поле `modifier: true` и битовая
+ * маска `modifier_flags`. При использовании рядом с обычным эмоутом
+ * ("Kappa ffzRainbow") эффект применяется к соседнему эмоуту, а не
+ * рисуется отдельной картинкой — тот же принцип, что у наших zero-width
+ * оверлеев 7TV.
+ *
+ * Точные значения битов подтверждены напрямую по открытым исходникам
+ * FrankerFaceZ (github.com/FrankerFaceZ/FrankerFaceZ,
+ * src/modules/chat/emotes.js + src/utilities/object.ts) — `make_enum_flags`
+ * присваивает биты как 2^i строго по порядку объявления:
+ * Hidden=1, FlipX=2, FlipY=4, GrowX=8, Slide=16, Appear=32, Leave=64,
+ * Rotate=128, Rotate90=256, Greyscale=512, Sepia=1024, Rainbow=2048,
+ * HyperRed=4096, Shake=8192, Cursed=16384, Jam=32768, Bounce=65536.
+ * Здесь нужны только те 8, что соответствуют запрошенным именам эмоутов.
+ */
+export const FFZ_EFFECT_FLAGS = {
+    FlipX: 2,      // ffzX
+    FlipY: 4,      // ffzY
+    GrowX: 8,      // ffzW
+    Slide: 16,     // ffzSlide
+    Appear: 32,    // ffzArrive
+    Leave: 64,     // ffzLeave
+    Rotate: 128,   // ffzSpin
+    Rainbow: 2048, // ffzRainbow
+    HyperRed: 4096,// ffzHyper
+    Cursed: 16384, // ffzCursed
+    Jam: 32768,    // ffzJam
+    Bounce: 65536  // ffzBounce
+} as const;
+
+export interface FFZEffectEmote {
+    url: string;
+    flags: number;
+}
+
+const FFZ_EFFECTS_CACHE_KEY = 'twitchtts_ffz_effects_v1';
+let ffzEffectsPromise: Promise<Map<string, FFZEffectEmote>> | null = null;
+
+export function fetchFFZEffectEmotes(): Promise<Map<string, FFZEffectEmote>> {
+    if (!ffzEffectsPromise) {
+        ffzEffectsPromise = (async () => {
+            const cached = readLocalCache<[string, FFZEffectEmote][]>(FFZ_EFFECTS_CACHE_KEY);
+            if (cached) return new Map(cached);
+
+            const map = new Map<string, FFZEffectEmote>();
+            try {
+                const res = await fetch('https://api.frankerfacez.com/v1/set/global');
+                if (res.ok) {
+                    const data = await res.json();
+                    const sets = data.sets || {};
+                    Object.values(sets).forEach((set: any) => {
+                        (set.emoticons || []).forEach((e: any) => {
+                            if (!e.modifier || !e.modifier_flags) return;
+                            const url = e.urls?.['4'] || e.urls?.['2'] || e.urls?.['1'];
+                            if (url) map.set(e.name, { url: url.startsWith('http') ? url : `https:${url}`, flags: e.modifier_flags });
+                        });
+                    });
+                    writeLocalCache(FFZ_EFFECTS_CACHE_KEY, Array.from(map.entries()));
+                }
+            } catch (e) {
+                console.error('[FFZ] Ошибка загрузки emote-эффектов:', e);
+            }
+            return map;
+        })();
+    }
+    return ffzEffectsPromise;
+}
+
 export async function fetch7TVEmotesByTwitchId(twitchId: string) {
     const emoteMap = new Map<string, SevenTVEmoteEntry>();
     try {

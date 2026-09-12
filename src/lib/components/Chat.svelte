@@ -8,13 +8,14 @@
         fetchFFZPersonalBadges,
         fetchBTTVChannelData,
         getBTTVGlobalEmotes,
+        fetchFFZEffectEmotes,
         fetchHomiesBadge,
         preloadSevenTVPaintCatalog,
         resolveTwitchUser,
         clearPersonalCosmeticsCache
     } from '$lib/services/twitch-api';
     import type { ChatMessage } from '$lib/services/twitch-irc';
-    import { parseMessage, type Fragment, type SevenTVEmoteEntry } from '$lib/services/message-parser';
+    import { parseMessage, ffzEffectStyle, type Fragment, type SevenTVEmoteEntry } from '$lib/services/message-parser';
     import { buildPreviewEmoteMaps, PREVIEW_MESSAGES } from '$lib/services/chat-preview-data';
     import { page } from '$app/state';
 
@@ -60,6 +61,9 @@
     // и так уже показываются как обычный текст, тут ничего дополнительно
     // ломать не нужно.
     const showBttvEffects = urlParams.get('showBttvEffects') !== 'false';
+    // FFZ Emote Effects (ffzRainbow, ffzSpin, ffzCursed и т.п.) — те же
+    // соображения, что и у showBttvEffects выше.
+    const showFfzEffects = urlParams.get('showFfzEffects') !== 'false';
 
     // Скрытие команд (!tts, !skip и т.п.) из ВИЗУАЛЬНОГО чата — сама
     // обработка команд для TTS живёт отдельно в widget/+page.svelte и тут
@@ -137,6 +141,7 @@
                 : 'Загрузка бейджей и эмоутов…';
     let emoteMap = new Map<string, SevenTVEmoteEntry>();
     let channelEmoteMap = new Map<string, string>();
+    let ffzEffectMap = new Map<string, { url: string; flags: number }>();
     let badgeDictionary: Record<string, string> = {};
     let ffzModBadge: string | undefined;
     let ffzVipBadge: string | undefined;
@@ -227,8 +232,32 @@
      * привязки к DOM/сети, легко тестируется в изоляции), здесь только
      * прокидываем актуальное состояние компонента.
      */
+    /**
+     * Собирает style-строку для одного эмоут-фрагмента, комбинируя BTTV- и
+     * FFZ-эффекты через отдельные CSS-переменные (--bttv-transform,
+     * --ffz-transform, --ffz-filter — см. .emote/.emote-stack в блоке стилей ниже).
+     * Если сообщение когда-нибудь содержит ОБА c! (BTTV cursed, своя тень
+     * через CSS-класс) и одновременно активную FFZ-анимацию — анимация,
+     * заданная тут инлайново, победит тень из класса (инлайн всегда
+     * весомее класса). Комбинация настолько маловероятна на практике
+     * (два разных модификатора cursed из разных экосистем на одном
+     * эмоуте), что усложнять ради неё не стал.
+     */
+    function emoteInlineStyle(f: Extract<Fragment, { type: 'emote' }>): string {
+        const parts: string[] = [];
+        if (showBttvEffects && f.bttvTransform) parts.push(`--bttv-transform: ${f.bttvTransform}`);
+        if (showFfzEffects && f.ffzEffectFlags) {
+            const fx = ffzEffectStyle(f.ffzEffectFlags);
+            if (fx.transform) parts.push(`--ffz-transform: ${fx.transform}`);
+            if (fx.filter) parts.push(`--ffz-filter: ${fx.filter}`);
+            if (fx.animation) parts.push(`animation: ${fx.animation}`);
+            if (fx.transformOrigin) parts.push(`transform-origin: ${fx.transformOrigin}`);
+        }
+        return parts.join('; ');
+    }
+
     function parseMessageForChat(text: string, twitchEmotes: Record<string, string[]> | undefined, gifs: import('$lib/services/twitch-irc').GifInfo[] | undefined): Fragment[] {
-        return parseMessage(text, twitchEmotes, showGifs ? gifs : undefined, emoteMap, channelEmoteMap, userColorMap);
+        return parseMessage(text, twitchEmotes, showGifs ? gifs : undefined, emoteMap, channelEmoteMap, userColorMap, showFfzEffects ? ffzEffectMap : undefined);
     }
 
     function badgeUrlFor(name: string, version: string): string {
@@ -499,6 +528,11 @@
         // пейнтов к моменту, когда придёт первое сообщение с градиентом.
         preloadSevenTVPaintCatalog();
 
+        // FFZ Emote Effects (ffzRainbow, ffzSpin и т.п.) — глобальный набор,
+        // общий для всех каналов, поэтому грузится независимо от
+        // loadChannelExtras() и не блокирует остальной onMount.
+        fetchFFZEffectEmotes().then((m) => { ffzEffectMap = m; }).catch(() => {});
+
         try {
             const user = await resolveTwitchUser(channel);
             if (!user) return;
@@ -620,7 +654,7 @@
                     {:else if f.type === 'gif'}
                         <img src={f.url} class="chat-gif" on:error={handleImageError} loading="lazy" alt="GIF" />
                     {:else if f.urls.length > 1}
-                        <span class="emote-stack" class:bttv-cursed={showBttvEffects && f.bttvCursed} style={showBttvEffects && f.bttvTransform ? `--bttv-transform: ${f.bttvTransform}` : ''}>
+                        <span class="emote-stack" class:bttv-cursed={showBttvEffects && f.bttvCursed} style={emoteInlineStyle(f)}>
                             {#each f.urls as url}
                                 <img src={url} class="emote" on:error={handleImageError} loading="lazy" alt="" />
                             {/each}
@@ -630,7 +664,7 @@
                             src={f.urls[0]}
                             class="emote"
                             class:bttv-cursed={showBttvEffects && f.bttvCursed}
-                            style={showBttvEffects && f.bttvTransform ? `--bttv-transform: ${f.bttvTransform}` : ''}
+                            style={emoteInlineStyle(f)}
                             on:error={handleImageError}
                             loading="lazy"
                             alt=""
@@ -764,7 +798,7 @@
         width: auto !important;
         vertical-align: middle;
         margin: 0 2px;
-        filter: drop-shadow(1px 1px 2px rgba(0,0,0,0.5));
+        filter: var(--ffz-filter, none) drop-shadow(1px 1px 2px rgba(0,0,0,0.5));
     }
 
     /*
@@ -799,15 +833,15 @@
     }
 
     /*
-     * --bttv-transform выставляется инлайново из template (wide/flip/rotate),
-     * а .emote/.emote-stack всегда её подхватывают через var(...) — так
-     * cursed-анимация ниже может ДОБАВить к ней свой skew, а не перебить
-     * инлайновый transform целиком (если бы cursed-keyframes напрямую
-     * задавали transform без var(), это стёрло бы, скажем, wide при
-     * сочетании "c! w! Kappa").
+     * --bttv-transform/--ffz-transform выставляются инлайново из template
+     * (wide/flip/rotate у BTTV, flip/wide у FFZ), а .emote/.emote-stack
+     * всегда их подхватывают через var(...) — так анимации ниже могут
+     * ДОБАВить свой transform, а не перебить инлайновый целиком (если бы
+     * keyframes напрямую задавали transform без var(), это стёрло бы,
+     * скажем, wide при сочетании "c! w! Kappa" или "Kappa ffzX ffzSpin").
      */
     .emote, .emote-stack {
-        transform: var(--bttv-transform, none);
+        transform: var(--bttv-transform, none) var(--ffz-transform, none);
     }
 
     /*
@@ -825,6 +859,133 @@
     @keyframes bttvCursedJitter {
         from { transform: var(--bttv-transform, none) skewX(-6deg) translateY(0); }
         to { transform: var(--bttv-transform, none) skewX(6deg) translateY(-2px); }
+    }
+
+    /*
+     * FFZ Emote Effects — все проценты/значения ниже переписаны напрямую
+     * из открытых исходников FrankerFaceZ (github.com/FrankerFaceZ/
+     * FrankerFaceZ, src/modules/chat/emotes.js: EFFECT_STYLES,
+     * APPEAR_FRAMES, LEAVE_FRAMES, appearLeaveToKeyframes), а не подобраны
+     * на глаз — та же логика, что для var(--bttv-transform, none) выше:
+     * var(--ffz-transform, none) даёт статичным FlipX/FlipY/GrowX
+     * (ffzX/ffzY/ffzW) сочетаться с анимацией, а не стираться ей.
+     */
+    @keyframes ffzFxRotate {
+        0% { transform: var(--ffz-transform, none) var(--bttv-transform, none) rotate(0deg); }
+        100% { transform: var(--ffz-transform, none) var(--bttv-transform, none) rotate(360deg); }
+    }
+
+    @keyframes ffzFxRainbow {
+        0% { filter: var(--ffz-filter, none) hue-rotate(0deg); }
+        100% { filter: var(--ffz-filter, none) hue-rotate(360deg); }
+    }
+
+    @keyframes ffzFxJam {
+        0% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(-2px, -2px) rotate(-6deg); }
+        10% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(-1.5px, -2px) rotate(-8deg); }
+        20% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(1px, -1.5px) rotate(-8deg); }
+        30% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(3px, 2.5px) rotate(-6deg); }
+        40% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(3px, 4px) rotate(-2deg); }
+        50% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(2px, 4px) rotate(3deg); }
+        60% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(1px, 4px) rotate(3deg); }
+        70% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(-0.5px, 3px) rotate(2deg); }
+        80% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(-1.25px, 1px) rotate(0deg); }
+        90% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(-1.75px, -0.5px) rotate(-2deg); }
+        100% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translate(-2px, -2px) rotate(-5deg); }
+    }
+
+    @keyframes ffzFxBounce {
+        0% { transform: scale(0.8, 1) var(--ffz-transform, none) var(--bttv-transform, none); }
+        10% { transform: scale(0.9, 0.8) var(--ffz-transform, none) var(--bttv-transform, none); }
+        20% { transform: scale(1, 0.4) var(--ffz-transform, none) var(--bttv-transform, none); }
+        25% { transform: scale(1.2, 0.3) var(--ffz-transform, none) var(--bttv-transform, none); }
+        25.001% { transform: scale(-1.2, 0.3) var(--ffz-transform, none) var(--bttv-transform, none); }
+        30% { transform: scale(-1, 0.4) var(--ffz-transform, none) var(--bttv-transform, none); }
+        40% { transform: scale(-0.9, 0.8) var(--ffz-transform, none) var(--bttv-transform, none); }
+        50% { transform: scale(-0.8, 1) var(--ffz-transform, none) var(--bttv-transform, none); }
+        60% { transform: scale(-0.9, 0.8) var(--ffz-transform, none) var(--bttv-transform, none); }
+        70% { transform: scale(-1, 0.4) var(--ffz-transform, none) var(--bttv-transform, none); }
+        75% { transform: scale(-1.2, 0.3) var(--ffz-transform, none) var(--bttv-transform, none); }
+        75.001% { transform: scale(1.2, 0.3) var(--ffz-transform, none) var(--bttv-transform, none); }
+        80% { transform: scale(1, 0.4) var(--ffz-transform, none) var(--bttv-transform, none); }
+        90% { transform: scale(0.9, 0.8) var(--ffz-transform, none) var(--bttv-transform, none); }
+        100% { transform: scale(0.8, 1) var(--ffz-transform, none) var(--bttv-transform, none); }
+    }
+
+    /*
+     * Slide (ffzSlide) у настоящего FFZ — это бесшовная прокрутка спрайта
+     * шириной в две копии картинки через background-position (нужна
+     * известная ширина эмоута и рендер через background-image, а не
+     * <img>). У нас эмоуты — обычные <img>, поэтому это сознательное
+     * приближение (лёгкое покачивание по горизонтали), а не точное
+     * повторение оригинального механизма.
+     */
+    @keyframes ffzFxSlide {
+        0% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-15%); }
+        100% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(15%); }
+    }
+
+    @keyframes ffzFxAppear {
+        0% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-18px) scale(0); }
+        19.99% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-18px) scale(0); }
+        20% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-18px) scale(0.1); }
+        25% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-16px) scale(0.2) translateY(0.6px); }
+        30% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-14px) scale(0.3) translateY(-4px); }
+        35% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-12px) scale(0.4) translateY(0.6px); }
+        40% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-10px) scale(0.5) translateY(-4px); }
+        45% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-8px) scale(0.6) translateY(2px); }
+        50% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-6px) scale(0.7) translateY(-3px); }
+        55% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-4px) scale(0.8) translateY(2px); }
+        60% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-2px) scale(0.9) translateY(-3px); }
+        65% { transform: var(--ffz-transform, none) var(--bttv-transform, none) scale(1); }
+        100% { transform: var(--ffz-transform, none) var(--bttv-transform, none) scale(1); }
+    }
+
+    @keyframes ffzFxLeave {
+        0% { transform: var(--ffz-transform, none) var(--bttv-transform, none) scale(1); }
+        39.99% { transform: var(--ffz-transform, none) var(--bttv-transform, none) scale(1); }
+        40% { transform: var(--ffz-transform, none) var(--bttv-transform, none) scale(-0.9, 0.9) translateY(-3px); }
+        45% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-2px) scale(-0.8, 0.8) translateY(2px); }
+        50% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-4px) scale(-0.7, 0.7) translateY(-3px); }
+        55% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-6px) scale(-0.6, 0.6) translateY(2px); }
+        60% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-8px) scale(-0.5, 0.5) translateY(-4px); }
+        65% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-10px) scale(-0.4, 0.4) translateY(0.6px); }
+        70% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-12px) scale(-0.3, 0.3) translateY(-4px); }
+        75% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-14px) scale(-0.2, 0.2) translateY(0.6px); }
+        80% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-16px) scale(-0.1, 0.1); }
+        85% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-18px) scale(-0.01, 0); }
+        100% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-18px) scale(0, 0); }
+    }
+
+    /* Появление (0-50%) сжато в первую половину цикла, исчезновение
+       (50-100%) — во вторую, итоговая анимация вдвое длиннее (6s вместо
+       3s) — так же, как у самого FFZ при сочетании ffzArrive+ffzLeave. */
+    @keyframes ffzFxInOut {
+        0% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-18px) scale(0); }
+        9.995% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-18px) scale(0); }
+        10% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-18px) scale(0.1); }
+        12.5% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-16px) scale(0.2) translateY(0.6px); }
+        15% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-14px) scale(0.3) translateY(-4px); }
+        17.5% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-12px) scale(0.4) translateY(0.6px); }
+        20% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-10px) scale(0.5) translateY(-4px); }
+        22.5% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-8px) scale(0.6) translateY(2px); }
+        25% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-6px) scale(0.7) translateY(-3px); }
+        27.5% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-4px) scale(0.8) translateY(2px); }
+        30% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-2px) scale(0.9) translateY(-3px); }
+        32.5% { transform: var(--ffz-transform, none) var(--bttv-transform, none) scale(1); }
+        50% { transform: var(--ffz-transform, none) var(--bttv-transform, none) scale(1); }
+        69.995% { transform: var(--ffz-transform, none) var(--bttv-transform, none) scale(1); }
+        70% { transform: var(--ffz-transform, none) var(--bttv-transform, none) scale(-0.9, 0.9) translateY(-3px); }
+        72.5% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-2px) scale(-0.8, 0.8) translateY(2px); }
+        75% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-4px) scale(-0.7, 0.7) translateY(-3px); }
+        77.5% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-6px) scale(-0.6, 0.6) translateY(2px); }
+        80% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-8px) scale(-0.5, 0.5) translateY(-4px); }
+        82.5% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-10px) scale(-0.4, 0.4) translateY(0.6px); }
+        85% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-12px) scale(-0.3, 0.3) translateY(-4px); }
+        87.5% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-14px) scale(-0.2, 0.2) translateY(0.6px); }
+        90% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-16px) scale(-0.1, 0.1); }
+        92.5% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-18px) scale(-0.01, 0); }
+        100% { transform: var(--ffz-transform, none) var(--bttv-transform, none) translateX(-18px) scale(0, 0); }
     }
 
     /*

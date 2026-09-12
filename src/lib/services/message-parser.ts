@@ -8,10 +8,11 @@
  */
 
 import type { GifInfo } from './twitch-irc';
+import { FFZ_EFFECT_FLAGS } from './twitch-api';
 
 export type Fragment =
     | { type: 'text'; val: string; mentionColor?: string }
-    | { type: 'emote'; urls: string[]; bttvTransform?: string; bttvCursed?: boolean }
+    | { type: 'emote'; urls: string[]; bttvTransform?: string; bttvCursed?: boolean; ffzEffectFlags?: number }
     | { type: 'gif'; url: string };
 
 export interface SevenTVEmoteEntry {
@@ -49,6 +50,54 @@ function bttvTransformFor(mods: Set<BttvMod>): string | undefined {
     return parts.length ? parts.join(' ') : undefined;
 }
 
+export interface FfzEffectCss {
+    transform?: string;
+    filter?: string;
+    animation?: string;
+    transformOrigin?: string;
+}
+
+/**
+ * Собирает итоговый CSS из побитовой комбинации FFZ_EFFECT_FLAGS. Названия
+ * @keyframes (ffzFxRotate, ffzFxRainbow и т.д.) заданы в Chat.svelte —
+ * здесь только решается, какие из них включать и с какими параметрами.
+ *
+ * FlipX/FlipY/GrowX собираются в один статичный transform: scale(...) —
+ * так же, как у BTTV-модификаторов выше. Остальные эффекты — анимации,
+ * которые могут идти ОДНОВРЕМЕННО (запятая в CSS-свойстве animation) —
+ * несколько FFZ-эффектов на одном эмоуте это нормальный сценарий
+ * ("Kappa ffzRainbow ffzSpin").
+ */
+export function ffzEffectStyle(flags: number): FfzEffectCss {
+    const F = FFZ_EFFECT_FLAGS;
+    let scaleX = 1, scaleY = 1;
+    if (flags & F.FlipX) scaleX *= -1;
+    if (flags & F.FlipY) scaleY *= -1;
+    if (flags & F.GrowX) scaleX *= 2;
+    const transform = (scaleX !== 1 || scaleY !== 1) ? `scale(${scaleX}, ${scaleY})` : undefined;
+
+    const filterParts: string[] = [];
+    if (flags & F.HyperRed) filterParts.push('brightness(0.2) sepia(1) brightness(2.2) contrast(3) saturate(8)');
+    if (flags & F.Cursed) filterParts.push('grayscale(1) brightness(0.7) contrast(2.5)');
+    const filter = filterParts.length ? filterParts.join(' ') : undefined;
+
+    const animations: string[] = [];
+    let transformOrigin: string | undefined;
+    if (flags & F.Rotate) animations.push('ffzFxRotate 1.5s linear infinite');
+    if (flags & F.Rainbow) animations.push('ffzFxRainbow 2s linear infinite');
+    if (flags & F.Jam) animations.push('ffzFxJam 0.6s linear infinite');
+    if (flags & F.Bounce) { animations.push('ffzFxBounce 0.5s linear infinite'); transformOrigin = 'bottom center'; }
+    if (flags & F.Slide) animations.push('ffzFxSlide 1s ease-in-out infinite alternate');
+
+    const appear = !!(flags & F.Appear);
+    const leave = !!(flags & F.Leave);
+    if (appear && leave) animations.push('ffzFxInOut 6s linear infinite');
+    else if (appear) animations.push('ffzFxAppear 3s linear infinite');
+    else if (leave) animations.push('ffzFxLeave 3s linear infinite');
+
+    return { transform, filter, animation: animations.length ? animations.join(', ') : undefined, transformOrigin };
+}
+
 /**
  * Порядок приоритета: нативные твич-эмоуты и GIF (по индексам из тегов IRC,
  * это единственно надёжный способ, т.к. текст мог содержать похожие слова) →
@@ -71,7 +120,8 @@ export function parseMessage(
     gifs: GifInfo[] | undefined,
     emoteMap: Map<string, SevenTVEmoteEntry>,
     channelEmoteMap: Map<string, string>,
-    userColorMap: Map<string, string>
+    userColorMap: Map<string, string>,
+    ffzEffectMap?: Map<string, { url: string; flags: number }>
 ): Fragment[] {
     const nodes: { kind: 'emote' | 'gif'; val: string; start: number; end: number }[] = [];
     if (twitchEmotes) {
@@ -170,6 +220,24 @@ export function parseMessage(
             if (ffz) {
                 pushEmote(ffz, pendingMods.has('zeroSpace'), pendingMods);
                 pendingMods = new Set(); pendingWords = [];
+                return;
+            }
+
+            // FFZ Emote Effects (ffzRainbow, ffzSpin и т.п.) — идут ПОСЛЕ
+            // эмоута, который модифицируют ("Kappa ffzRainbow"), в отличие
+            // от BTTV-модификаторов выше. Несколько подряд комбинируются
+            // побитовым OR на одном и том же эмоуте ("Kappa ffzRainbow
+            // ffzSpin" — оба эффекта сразу), как и у самого FFZ.
+            const ffzEffect = ffzEffectMap?.get(clean);
+            if (ffzEffect) {
+                if (lastMeaningful && lastMeaningful.type === 'emote') {
+                    lastMeaningful.ffzEffectFlags = (lastMeaningful.ffzEffectFlags || 0) | ffzEffect.flags;
+                    return;
+                }
+                // Использован сам по себе, без эмоута перед ним — применить
+                // эффект не к чему, показываем как обычный самостоятельный
+                // эмоут (у модификаторов FFZ тоже есть своя картинка).
+                pushEmote(ffzEffect.url, false);
                 return;
             }
 
